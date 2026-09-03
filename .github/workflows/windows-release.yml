@@ -52,8 +52,6 @@ jobs:
           $ErrorActionPreference = "Stop"
           if ("${{ github.ref_type }}" -eq "tag") {
             $version = "${{ github.ref_name }}"
-          } elseif ("${{ contains(github.event.head_commit.message, '[release-tag:0.2.0]') }}" -eq "true") {
-            $version = "0.2.0"
           } else {
             $version = "${{ github.sha }}".Substring(0, 7)
           }
@@ -86,7 +84,7 @@ jobs:
 
   release:
     name: Publish GitHub release
-    if: github.event_name == 'push' && (github.ref_type == 'tag' || contains(github.event.head_commit.message, '[release-tag:0.2.0]'))
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: build-windows
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -103,16 +101,15 @@ jobs:
       - name: Create release and upload assets
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '0.2.0' }}
         run: |
           set -euo pipefail
-          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" \
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --generate-notes \
-              --title "$RELEASE_TAG"
+              --title "$GITHUB_REF_NAME"
           fi
-          gh release upload "$RELEASE_TAG" dist/* \
+          gh release upload "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
