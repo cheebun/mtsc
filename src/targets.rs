@@ -105,12 +105,18 @@ pub fn marker_from_identity(identity: &[u8; 10]) -> [u8; 2] {
 
 // ---- Internal implementation ----
 
-struct KeyEntry {
-    software_id: String,
-    signature_hex: String,
+pub(crate) struct KeyEntry {
+    pub(crate) software_id: String,
+    #[allow(dead_code)] // read by tests that need the full entry, not just software_id
+    pub(crate) signature_hex: String,
 }
 
-fn load_from_file(path: &str) -> Option<Vec<KeyEntry>> {
+/// `pub(crate)` (not just an internal helper) so tests elsewhere in the crate can load raw
+/// `keys.toml` entries and decode their *unmasked* SOFTWARE ID -- `load_targets`'s own
+/// `Target.need_hi` bakes in a specific mix and masks to `u8`, which is wrong for code that
+/// needs the target's raw (tv_lo, tv_hi) pair against multiple/no fixed mix (e.g. checking
+/// feasibility across all 2048 possible `mbr_val` values).
+pub(crate) fn load_from_file(path: &str) -> Option<Vec<KeyEntry>> {
     if !Path::new(path).exists() {
         return None;
     }

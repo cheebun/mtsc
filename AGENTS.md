@@ -66,6 +66,22 @@ cargo fmt --check   # format check
 
 - Command-line examples in `docs/` and `AGENTS.md` use **long-form flags** (`--disk-size`, not `-s`) for readability -- short flags are fine in interactive/muscle-memory use but obscure meaning for a reader seeing the command cold.
 
+## Private Data Handling
+
+`keys.toml` is gitignored (never reaches the public repo), but chat/tool-output transcripts are a
+separate leak surface. Entries marked `private = true` in `keys.toml` are under an explicit
+disclosure restriction from the user (currently: the 99 real-hardware CCR1009 licenses imported
+2026-09-07, plus `WUB2-EYCK`, `HCC0-4FJR`, `XU4M-NJ40`):
+
+- Never paste their `identity`, `model`, `serial`, or `signature_hex` field values into a chat
+  response or tool-call diff (Edit old_string/new_string included) — refer to them only by
+  `software_id`.
+- Entries **without** `private = true` are not covered by this restriction and may be discussed/
+  quoted normally (as has been done throughout this project's docs/investigation notes).
+- When adding a new `[[key]]` entry sourced from the user's own private license inventory (as
+  opposed to a publicly-documented forum post etc.), default to `private = true` and follow the
+  same non-disclosure handling above unless the user says otherwise.
+
 ## Code Rules
 
 - Single source of constants: `sha256_constants.rs`, shared by all three SHA-256 implementations

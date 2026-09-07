@@ -1193,6 +1193,207 @@ mod tests {
         }
     }
 
+    // ---- mbr_val search strategy cross-validation (Approach A vs Approach B) ----
+    //
+    // Two independent ways to find, for a fixed serial/model/size, which `mbr_val`
+    // (0..2048) reproduces a target SOFTWARE ID when `--identity` isn't fixed:
+    //
+    //   Approach A ("sweep"): for each candidate, try all 2048 `mbr_val` values and
+    //   compare the resulting (final_lo, final_hi) against the target's raw values.
+    //   O(2048) per candidate.
+    //
+    //   Approach B ("feasibility check", per docs/reference/identity-reverse-search.md):
+    //   for each candidate, XOR its sid_lo/sid_hi against the target directly to get the
+    //   *required* mix, then check it's an exact multiple of 0x3FF800F with a quotient in
+    //   0..=2047. O(1) per candidate (per target) -- no sweep needed.
+    //
+    // Both must find exactly the same hits. This test builds a small synthetic search
+    // space with a known "needle" (a specific candidate/mbr_val pair guaranteed to hit),
+    // runs both approaches over it, and asserts their hit sets agree exactly -- the same
+    // cross-validation-by-independent-implementation pattern this project already uses
+    // for SIMD vs. scalar SHA-256 (`test_simd_matches_scalar`).
+    #[test]
+    fn test_mbr_val_sweep_vs_feasibility_check_agree() {
+        const N_CANDIDATES: usize = 2000;
+        const NEEDLE_IDX: usize = 777;
+        const NEEDLE_MBR_VAL: u32 = 555;
+        const MIX_MULTIPLIER: u64 = 0x3FF800F;
+
+        // Fixed model/disk-size context, same shape as a real `search` run.
+        let model_bytes = build_model_bytes("ROS1G");
+        let sector_val = disk_bytes_to_sector_val(1_073_741_824); // 1G
+        let sv_bytes = sector_val.to_le_bytes();
+
+        // Generate N_CANDIDATES consecutive serials (BCD increment, same as the real
+        // search loop) and their (sid_lo, sid_hi) hashes.
+        let mut serial_buf = [b'0'; SERIAL_LEN];
+        let mut candidates: Vec<(u32, u8)> = Vec::with_capacity(N_CANDIDATES);
+        for _ in 0..N_CANDIDATES {
+            let buf = build_input_buf(&serial_buf, &model_bytes, &sv_bytes);
+            candidates.push(sha256::hash_40(&buf));
+            increment_bcd(&mut serial_buf);
+        }
+
+        // Plant the needle: the target is whatever SOFTWARE ID candidate NEEDLE_IDX
+        // produces under NEEDLE_MBR_VAL. Computed directly (not via encode/decode --
+        // those have their own tests) as the raw (target_lo, target_hi) pair.
+        let (needle_sid_lo, needle_sid_hi) = candidates[NEEDLE_IDX];
+        let needle_mix = (NEEDLE_MBR_VAL as u64) * MIX_MULTIPLIER;
+        let needle_mix_lo = needle_mix as u32;
+        let needle_mix_hi = (needle_mix >> 32) as u32;
+        let target_lo = needle_sid_lo ^ needle_mix_lo;
+        let target_hi = ((needle_sid_hi as u32) | 0x100) ^ needle_mix_hi;
+
+        // Approach A: sweep all 2048 mbr_val per candidate.
+        let mut hits_a: Vec<(usize, u32)> = Vec::new();
+        for (i, &(sid_lo, sid_hi)) in candidates.iter().enumerate() {
+            for mbr_val in 0u32..2048 {
+                let mix = (mbr_val as u64) * MIX_MULTIPLIER;
+                let mix_lo = mix as u32;
+                let mix_hi = (mix >> 32) as u32;
+                let final_lo = sid_lo ^ mix_lo;
+                let final_hi = ((sid_hi as u32) | 0x100) ^ mix_hi;
+                if final_lo == target_lo && final_hi == target_hi {
+                    hits_a.push((i, mbr_val));
+                }
+            }
+        }
+
+        // Approach B: feasibility check per candidate, no sweep.
+        // NOTE: `target_hi` must NOT be masked to 8 bits here -- `final_hi` carries the
+        // `|0x100` bit plus mix_hi's own up-to-5-bit range, so it can exceed a byte.
+        let mut hits_b: Vec<(usize, u32)> = Vec::new();
+        for (i, &(sid_lo, sid_hi)) in candidates.iter().enumerate() {
+            let required_mix_lo = sid_lo ^ target_lo;
+            let required_mix_hi = ((sid_hi as u32) | 0x100) ^ target_hi;
+            let required_mix = (required_mix_lo as u64) | ((required_mix_hi as u64) << 32);
+            if required_mix % MIX_MULTIPLIER == 0 {
+                let mbr_val = required_mix / MIX_MULTIPLIER;
+                if mbr_val < 2048 {
+                    hits_b.push((i, mbr_val as u32));
+                }
+            }
+        }
+
+        assert!(
+            hits_a.contains(&(NEEDLE_IDX, NEEDLE_MBR_VAL)),
+            "planted needle must be found by approach A"
+        );
+        assert!(
+            hits_b.contains(&(NEEDLE_IDX, NEEDLE_MBR_VAL)),
+            "planted needle must be found by approach B"
+        );
+        assert_eq!(
+            hits_a, hits_b,
+            "sweep (A) and feasibility-check (B) must find exactly the same hits"
+        );
+    }
+
+    /// Real-disk, all-`keys.toml`-targets version of the A-vs-B cross-check above: for a
+    /// specific real serial/model/size, sweep all 2048 `mbr_val` (Approach A) against
+    /// *every* entry in `keys.toml` and separately run the feasibility check (Approach B)
+    /// against every entry, then assert the two full hit sets agree exactly -- not just a
+    /// single planted needle this time, the complete result for this disk.
+    ///
+    /// `#[ignore]`: depends on `keys.toml` existing at the crate root at test-run time
+    /// (gitignored, not present in a fresh clone/CI) -- run explicitly with
+    /// `cargo test -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn test_real_disk_all_targets_sweep_vs_feasibility_check_agree() {
+        const MIX_MULTIPLIER: u64 = 0x3FF800F;
+
+        let serial = "1";
+        let model = "VMware Virtual SATA Hard Drive";
+        let sizes: [(&str, u64); 18] = [
+            ("60M", 62_914_560),
+            ("128M", 128 * 1024 * 1024),
+            ("256M", 256 * 1024 * 1024),
+            ("512M", 512 * 1024 * 1024),
+            ("1G", 1024 * 1024 * 1024),
+            ("2G", 2 * 1024 * 1024 * 1024),
+            ("4G", 4 * 1024 * 1024 * 1024),
+            ("6G", 6 * 1024 * 1024 * 1024),
+            ("8G", 8 * 1024 * 1024 * 1024),
+            ("10G", 10 * 1024 * 1024 * 1024),
+            ("12G", 12 * 1024 * 1024 * 1024),
+            ("16G", 16 * 1024 * 1024 * 1024),
+            ("18G", 18 * 1024 * 1024 * 1024),
+            ("20G", 20 * 1024 * 1024 * 1024),
+            ("24G", 24 * 1024 * 1024 * 1024),
+            ("32G", 32 * 1024 * 1024 * 1024),
+            ("48G", 48 * 1024 * 1024 * 1024),
+            ("64G", 64 * 1024 * 1024 * 1024),
+        ];
+
+        let entries = targets::load_from_file("keys.toml").expect("keys.toml must be present");
+        assert!(!entries.is_empty(), "keys.toml must not be empty");
+
+        // Raw (unmasked) (name, tv_lo, tv_hi) per target -- NOT run through
+        // `entries_to_targets`, which bakes in one fixed mix and masks tv_hi to u8.
+        let raw_targets: Vec<(String, u32, u32)> = entries
+            .iter()
+            .map(|e| {
+                let tv = software_id::decode(&e.software_id)
+                    .unwrap_or_else(|err| panic!("invalid SOFTWARE ID {}: {}", e.software_id, err));
+                (e.software_id.clone(), tv as u32, (tv >> 32) as u32)
+            })
+            .collect();
+
+        for (size_label, total_bytes) in sizes {
+            for (bus, bus_label) in [(BusType::Ide, "Ide"), (BusType::Scsi, "Scsi")] {
+                let sector_val = sector_val_for_bus(bus, total_bytes);
+                let serial_bytes = build_serial_bytes(serial);
+                let model_bytes = build_model_bytes(model);
+                let buf = build_input_buf(&serial_bytes, &model_bytes, &sector_val.to_le_bytes());
+                let (sid_lo, sid_hi) = sha256::hash_40(&buf);
+
+                // Approach A: sweep all 2048 mbr_val, check against every target.
+                let mut hits_a: Vec<(String, u32)> = Vec::new();
+                for mbr_val in 0u32..2048 {
+                    let mix = (mbr_val as u64) * MIX_MULTIPLIER;
+                    let mix_lo = mix as u32;
+                    let mix_hi = (mix >> 32) as u32;
+                    let final_lo = sid_lo ^ mix_lo;
+                    let final_hi = ((sid_hi as u32) | 0x100) ^ mix_hi;
+                    for (name, tv_lo, tv_hi) in &raw_targets {
+                        if final_lo == *tv_lo && final_hi == *tv_hi {
+                            hits_a.push((name.clone(), mbr_val));
+                        }
+                    }
+                }
+
+                // Approach B: feasibility check per target, no sweep.
+                let mut hits_b: Vec<(String, u32)> = Vec::new();
+                for (name, tv_lo, tv_hi) in &raw_targets {
+                    let required_mix_lo = sid_lo ^ tv_lo;
+                    let required_mix_hi = ((sid_hi as u32) | 0x100) ^ tv_hi;
+                    let required_mix = (required_mix_lo as u64) | ((required_mix_hi as u64) << 32);
+                    if required_mix % MIX_MULTIPLIER == 0 {
+                        let mbr_val = required_mix / MIX_MULTIPLIER;
+                        if mbr_val < 2048 {
+                            hits_b.push((name.clone(), mbr_val as u32));
+                        }
+                    }
+                }
+                hits_a.sort();
+                hits_b.sort();
+
+                eprintln!(
+                    "[{size_label} bytes={total_bytes} {bus_label}] sid_lo=0x{sid_lo:08X} sid_hi=0x{sid_hi:02X} -- {} keys.toml targets checked",
+                    raw_targets.len()
+                );
+                eprintln!("[{size_label} {bus_label}] Approach A hits: {hits_a:?}");
+                eprintln!("[{size_label} {bus_label}] Approach B hits: {hits_b:?}");
+
+                assert_eq!(
+                    hits_a, hits_b,
+                    "[{size_label} {bus_label}] sweep (A) and feasibility-check (B) must find exactly the same hits for every keys.toml target"
+                );
+            }
+        }
+    }
+
     // ---- compute_software_id ----
 
     #[test]

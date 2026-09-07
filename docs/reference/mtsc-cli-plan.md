@@ -1290,7 +1290,9 @@ component.
       `docs/database/collision-database.md`, `docs/database/nvme-collision-database.md`,
       `docs/database/scsi-collision-database.md`,
       `docs/database/vmware-ide-collision-database.md`,
-      `resources/RouterOS-v6.49.13-VI8Q-E90F-L4-1GB/README.md`, plus the GitHub repo name
+      `resources/images/RouterOS-v6.49.13-VI8Q-E90F-L4-1GB/README.md` (path updated
+      2026-09-03 when `resources/` was split into `images/`/`programmer-firmware/`),
+      plus the GitHub repo name
       if that's also in scope (currently `cheebun/ros-serialgen`). Re-run the same
       `grep` at implementation time in case new files have picked up the string since
       this check.
