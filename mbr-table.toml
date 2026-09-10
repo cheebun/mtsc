@@ -5,7 +5,7 @@
 # repeated-digit-pattern identities in docs/reference/identity-reverse-search.md,
 # since those look obviously artificial next to a real device's effectively-random
 # identity bytes), recording the first identity found for each of the 2048 possible
-# mbr_val values. Real ros-serialgen check --identity <hex> output, not reimplemented
+# mbr_val values. Real mtsc check --identity <hex> output, not reimplemented
 # by hand. 2026-09-07, 19227 identities tried to cover all 2048 buckets -- matches
 # docs/reference/identity-reverse-search.md's independently-reported 19,227 figure
 # exactly (same identity=0-upward methodology).

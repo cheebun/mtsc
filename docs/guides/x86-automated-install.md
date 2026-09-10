@@ -78,7 +78,7 @@ qm start ${VMID}
 
 Everything above works identically for a `scsi0`-attached disk -- the installer's `sendkey` sequence doesn't care about disk bus type. Differences vs. the `ide0` examples above:
 
-- Use `ros-serialgen search`/`check --bus scsi` to get a `serial=`/`product=` combo (not `--model=`/`--serial=` from an `ide0` search -- see [license-internals.md §8](../investigation/license-internals.md#8-arm32-keyman-on-virtio-scsi-a-platform-specific-investigation) for why they're not interchangeable).
+- Use `mtsc search`/`check --bus scsi` to get a `serial=`/`product=` combo (not `--model=`/`--serial=` from an `ide0` search -- see [license-internals.md §8](../investigation/license-internals.md#8-arm32-keyman-on-virtio-scsi-a-platform-specific-investigation) for why they're not interchangeable).
 - VM config: `--scsihw virtio-scsi-pci`, `--scsi0 local:<vmid>/vm-<vmid>-disk-1.qcow2,serial=<serial>,size=<any size>` (disk size is irrelevant on `scsi0` -- `sector_val` is always `0` regardless of actual disk size, confirmed at both 1GiB and 2GiB), plus `--args '-set device.scsi0.product=<product>'` (no `vendor=` override needed -- it was confirmed to never participate in the hash computation).
 - The MBR write step (below) is unchanged -- same offset (`0x100`), same header format, same signature encoding, regardless of bus type.
 - Confirmed to fully activate (`nlevel: 6`, no `expires-in`) end-to-end on x86_64 with a fresh install and standard PVE-default `smbios1` -- no special SMBIOS configuration required.
@@ -131,11 +131,11 @@ Creating the verification disk with the nominal power-of-2 size (e.g. `171798691
 
 ## Lesson: signatures captured from real hardware need that hardware's identity bytes too
 
-This project's own collision search always assumes a fixed, all-zero MBR identity region (`0x100-0x109`), giving a fixed `mbr_val = 0x0BD` and thus a fixed mix. Every serial `ros-serialgen search` finds is specifically brute-forced to work with *that* fixed mix -- so writing the standard header (`00000000000000000000BDE800000000` + signature) always reproduces the correct SOFTWARE ID for those results.
+This project's own collision search always assumes a fixed, all-zero MBR identity region (`0x100-0x109`), giving a fixed `mbr_val = 0x0BD` and thus a fixed mix. Every serial `mtsc search` finds is specifically brute-forced to work with *that* fixed mix -- so writing the standard header (`00000000000000000000BDE800000000` + signature) always reproduces the correct SOFTWARE ID for those results.
 
 **This does not hold for signatures extracted from a real physical device.** A real device's MBR identity bytes are whatever it shipped with -- not all-zero -- so its `mbr_val` (and therefore its mix) is different from the collision-search convention. The device's serial + model + disk size were only ever hashed against *that* device's own mix to produce its SOFTWARE ID.
 
-This is not a new discovery -- it's exactly what [experiments.md](../investigation/experiments.md) Experiment 3 already documented from the earliest phase of this project: an original device's non-standard identity bytes stop matching the moment they're zeroed out. It's easy to lose sight of this once `ros-serialgen search` -- which always assumes the fixed all-zero convention -- becomes the primary daily workflow.
+This is not a new discovery -- it's exactly what [experiments.md](../investigation/experiments.md) Experiment 3 already documented from the earliest phase of this project: an original device's non-standard identity bytes stop matching the moment they're zeroed out. It's easy to lose sight of this once `mtsc search` -- which always assumes the fixed all-zero convention -- becomes the primary daily workflow.
 
 Writing the *real* signature with the *standard* all-zero header, using that same serial/model/size, computes a **different** SOFTWARE ID than the one the signature was issued for -- the license import will appear to succeed (SOFTWARE ID and signature both look well-formed) but RouterOS falls back to a 24-hour trial (`expires-in` present, no permanent `nlevel: 6`), because the signature doesn't cryptographically validate for the SOFTWARE ID your disk actually computed.
 

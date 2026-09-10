@@ -8,7 +8,7 @@ Deploy a licensed RouterOS virtual machine on Proxmox VE using a pre-computed co
 
 - Proxmox VE 8.x or 9.x host with SSH access
 - RouterOS x86 ISO uploaded to PVE storage ([download](https://mikrotik.com/download))
-- `ros-serialgen` binary built (`cargo build --release`)
+- `mtsc` binary built (`cargo build --release`)
 
 > **Note**: Commands below use `100` as an example VM ID. Replace it with a VMID that is free on your PVE host -- check with `qm list` first.
 
@@ -38,7 +38,7 @@ All entries above use space-free model names, so no `%20` encoding is needed.
 For unlisted sizes, search for a new collision (see [command-reference.md](reference/command-reference.md) for what each flag does; sub-1GB sizes are supported via `-u m/k/b`, minimum 64MB):
 
 ```bash
-ros-serialgen search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml
+mtsc search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml
 ```
 
 ---
@@ -145,7 +145,7 @@ Instead of writing the MBR offline, you can import a key file while RouterOS is 
 Generate the key text from the signature hex for your SOFTWARE ID (see the [Signature Table](database/collision-database.md#signature-table)):
 
 ```bash
-ros-serialgen sig2key <signature-hex-from-table>
+mtsc sig2key <signature-hex-from-table>
 ```
 
 This prints a `-----BEGIN MIKROTIK SOFTWARE KEY-----...-----END...-----` block. Paste it into the key file on the PVE host:
@@ -153,7 +153,7 @@ This prints a `-----BEGIN MIKROTIK SOFTWARE KEY-----...-----END...-----` block. 
 ```bash
 mkdir -p /tmp/serve
 cat > /tmp/serve/license.key << 'EOF'
-<paste the output of ros-serialgen sig2key here>
+<paste the output of mtsc sig2key here>
 EOF
 cd /tmp/serve && python3 --model http.server 8080 &
 ip addr add 10.255.255.1/24 dev vmbr0 2>/dev/null

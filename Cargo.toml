@@ -1,5 +1,5 @@
 [package]
-name = "ros-serialgen"
+name = "mtsc"
 version = "0.2.0"
 edition = "2021"
 description = "RouterOS L6 Serial Generator & License Key Converter"
@@ -8,6 +8,8 @@ description = "RouterOS L6 Serial Generator & License Key Converter"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 curve25519-dalek = "4"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
 
 [profile.release]
 opt-level = 3

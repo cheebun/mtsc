@@ -9,7 +9,7 @@ Collision results for model `"QEMU NVMe Ctrl"`. Standard identity (`000000000000
 ## 1G
 
 ```
-ros-serialgen search --bus ide --disk-size 1 --unit g --threads 4 --count 0 --model 'QEMU NVMe Ctrl'
+mtsc search --bus ide --disk-size 1 --unit g --threads 4 --count 0 --model 'QEMU NVMe Ctrl'
 ```
 
 | Software ID | Serial |

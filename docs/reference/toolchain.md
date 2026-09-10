@@ -13,7 +13,7 @@ Tools, dependencies, and operational commands used in this project.
 
 ---
 
-## ros-serialgen (This Project)
+## mtsc (This Project)
 
 Rust-based collision search tool with AVX-512 SIMD acceleration.
 
@@ -29,23 +29,23 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 
 ```bash
 # Search for a collision at a given disk size
-ros-serialgen search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml
+mtsc search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml
 
 # Sub-1GB sizes
-ros-serialgen search --disk-size 128 --unit m --threads <threads> --count 0 --keys keys.toml
+mtsc search --disk-size 128 --unit m --threads <threads> --count 0 --keys keys.toml
 
 # Resume from checkpoint
-ros-serialgen search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --from <progress_M> --keys keys.toml
+mtsc search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --from <progress_M> --keys keys.toml
 
 # Background execution
-nohup ros-serialgen search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml \
+nohup mtsc search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml \
   > /tmp/results.txt 2> /tmp/progress.txt &
 ```
 
 ### Verify
 
 ```bash
-ros-serialgen check --serial <Serial> --disk-size <N> --unit <g|m|k|b>
+mtsc check --serial <Serial> --disk-size <N> --unit <g|m|k|b>
 ```
 
 ### Test
@@ -118,7 +118,7 @@ Key findings:
 | bf5 | MBR mix value hardcoded wrong (`0x1EEF` default, not actual) | Computed actual `sha_val=0x1742`, `mbr_val=0x0BD` |
 | bf6 | Search space assumed wrong MBR header | Discovered key import bypasses the MBR header issue |
 
-The C tool has been superseded by ros-serialgen (Rust, AVX-512).
+The C tool has been superseded by mtsc (Rust, AVX-512).
 
 ---
 

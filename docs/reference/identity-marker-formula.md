@@ -13,7 +13,7 @@ The 80-byte MBR license region breaks down as:
 | `0x10C-0x10F` | 4 bytes | reserved | Always `00000000` |
 | `0x110-0x14F` | 64 bytes | signature | The EC-KCDSA-signed license blob |
 
-This project's own collision search (`ros-serialgen search`/`check -i`) always assumes the standard all-zero `identity`, which happens to produce `mbr_val = 0x0BD` and is written with the marker `BD E8`. Real hardware devices ship with non-zero `identity` bytes, and -- as this document establishes -- a **matching, non-standard `marker`** that is not `BD E8`.
+This project's own collision search (`mtsc search`/`check -i`) always assumes the standard all-zero `identity`, which happens to produce `mbr_val = 0x0BD` and is written with the marker `BD E8`. Real hardware devices ship with non-zero `identity` bytes, and -- as this document establishes -- a **matching, non-standard `marker`** that is not `BD E8`.
 
 ## The formula
 

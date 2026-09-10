@@ -5,6 +5,7 @@
 
 mod convert;
 mod curve25519;
+mod mbr_table;
 mod sha256;
 mod sha256_constants;
 #[cfg(test)]
@@ -51,9 +52,10 @@ struct Cli {
 enum Commands {
     /// Search collision serial for a disk size
     Search {
-        /// Disk size magnitude (paired with --unit)
+        /// Disk size magnitude (paired with --unit). Required for --bus ide/nvme; optional
+        /// (and ignored) for --bus scsi, where sector_val is always forced to 0.
         #[arg(short = 's', long = "disk-size")]
-        disk_size: u64,
+        disk_size: Option<u64>,
         /// Disk size unit: g (gigabytes, default), m (megabytes), k (kilobytes), or b (bytes)
         #[arg(short = 'u', long, value_enum, ignore_case = true, default_value = "g")]
         unit: SizeUnit,
@@ -73,13 +75,15 @@ enum Commands {
         #[arg(short = 'f', long, default_value = "0")]
         from: u64,
         /// Non-standard 20-hex-char MBR identity seed (0x100-0x109), e.g. from a real
-        /// device's captured MBR. Default: standard all-zero identity used by collision search.
+        /// device's captured MBR. Default: sweep all 2048 possible mbr_val values per
+        /// candidate serial instead of a single fixed identity (see --mbr-table).
         #[arg(short = 'i', long)]
         identity: Option<String>,
         /// Disk bus type: ide (default, verified against real hardware -- also covers
-        /// sata0/AHCI, which uses the identical encoding) or scsi (scsi0/virtio-scsi-pci
-        /// specifically, NOT sata0 -- forces sector_val=0; see docs/license-internals.md
-        /// §8.11-8.20; end-to-end activation confirmed on x86_64, §8.18).
+        /// sata0/AHCI, which uses the identical encoding), nvme (same sector_val rounding
+        /// as ide), or scsi (scsi0/virtio-scsi-pci specifically, NOT sata0 -- forces
+        /// sector_val=0; see docs/license-internals.md §8.11-8.20; end-to-end activation
+        /// confirmed on x86_64, §8.18).
         #[arg(
             short = 'b',
             long,
@@ -88,6 +92,26 @@ enum Commands {
             default_value = "ide"
         )]
         bus: BusType,
+        /// Path to the mbr_val -> identity/marker lookup table, used only when --identity is
+        /// NOT given (full mbr_val sweep mode). Default: ./mbr-table.toml if present,
+        /// otherwise an embedded complete table. Any mbr_val missing from this file is
+        /// filled in from the embedded default, so an incomplete file is never a hard error.
+        #[arg(long = "mbr-table")]
+        mbr_table: Option<String>,
+        /// How numeric candidate serials are padded to 20 bytes: zero (default, left-pad
+        /// with '0', e.g. "123" -> "00000000000000000123") or space (right-pad with spaces
+        /// using the natural digit count, e.g. "123" -> "123                 "). Real disks
+        /// don't always zero-pad a short numeric serial (confirmed on real hardware: QEMU's
+        /// scsi0 `serial=` property is written verbatim, not zero-padded, so a disk with a
+        /// short numeric serial may actually be space-padded by the controller instead) --
+        /// use this to search under that alternate assumption.
+        #[arg(
+            long = "serial-pad",
+            value_enum,
+            ignore_case = true,
+            default_value = "zero"
+        )]
+        serial_pad: SerialPad,
     },
     /// Convert signature_hex to Key text
     Sig2key {
@@ -110,9 +134,10 @@ enum Commands {
         /// Serial number (20-digit string)
         #[arg(long)]
         serial: String,
-        /// Disk size magnitude (paired with --unit)
+        /// Disk size magnitude (paired with --unit). Required for --bus ide/nvme; optional
+        /// (and ignored) for --bus scsi, where sector_val is always forced to 0.
         #[arg(short = 's', long = "disk-size")]
-        disk_size: u64,
+        disk_size: Option<u64>,
         /// Disk size unit: g (gigabytes, default), m (megabytes), k (kilobytes), or b (bytes)
         #[arg(short = 'u', long, value_enum, ignore_case = true, default_value = "g")]
         unit: SizeUnit,
@@ -127,9 +152,10 @@ enum Commands {
         #[arg(short = 'i', long)]
         identity: Option<String>,
         /// Disk bus type: ide (default, verified against real hardware -- also covers
-        /// sata0/AHCI, which uses the identical encoding) or scsi (scsi0/virtio-scsi-pci
-        /// specifically, NOT sata0 -- forces sector_val=0; see docs/license-internals.md
-        /// §8.11-8.20; end-to-end activation confirmed on x86_64, §8.18).
+        /// sata0/AHCI, which uses the identical encoding), nvme (same sector_val rounding
+        /// as ide), or scsi (scsi0/virtio-scsi-pci specifically, NOT sata0 -- forces
+        /// sector_val=0; see docs/license-internals.md §8.11-8.20; end-to-end activation
+        /// confirmed on x86_64, §8.18).
         #[arg(
             short = 'b',
             long,
@@ -167,6 +193,27 @@ enum BusType {
     /// SCSI-subsystem-presented disk (`scsi0`/`virtio-scsi-pci` -- NOT `sata0`, which uses
     /// `Ide`'s encoding instead, §8.20). Forces sector_val=0 -- see §8.11-8.19.
     Scsi,
+    /// NVMe-presented disk. Uses the identical sector_val rounding as `Ide` (disk size
+    /// matters, standard rounding rule) -- distinct from `Scsi`, which forces sector_val=0.
+    Nvme,
+}
+
+impl BusType {
+    /// Whether disk size is meaningless for this bus (sector_val is forced to a fixed
+    /// value regardless of size) -- currently only `Scsi`.
+    fn size_irrelevant(self) -> bool {
+        matches!(self, BusType::Scsi)
+    }
+}
+
+/// How a numeric candidate serial is padded to `SERIAL_LEN` bytes during `search`.
+/// See `zero_padded_to_space_padded` for the space-padding transform.
+#[derive(Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
+enum SerialPad {
+    /// Left-pad with '0' (default, current/original behavior).
+    Zero,
+    /// Right-pad with spaces, using the candidate's natural digit count (no leading zeros).
+    Space,
 }
 
 /// Disk size unit, paired with the `--disk-size` magnitude
@@ -237,6 +284,26 @@ fn disk_size_bytes_and_label(magnitude: u64, unit: SizeUnit) -> (u64, String) {
     (bytes, label)
 }
 
+/// Resolve `--disk-size`/`--unit` against the selected bus, enforcing that they're required
+/// for buses where disk size actually affects sector_val (ide/nvme) while remaining optional
+/// (and ignored) for buses where it doesn't (scsi -- sector_val is always forced to 0).
+/// Exits the process if disk_size is missing on a bus that needs it.
+fn resolve_disk_size(disk_size: Option<u64>, unit: SizeUnit, bus: BusType) -> (u64, String) {
+    match disk_size {
+        Some(magnitude) => {
+            validate_disk_size(magnitude, unit);
+            disk_size_bytes_and_label(magnitude, unit)
+        }
+        None if bus.size_irrelevant() => (0, "N/A (scsi, size ignored)".to_string()),
+        None => {
+            eprintln!(
+                "Error: --disk-size is required for --bus ide/nvme (only optional for --bus scsi)"
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Parse a 20-hex-char `--identity` argument into the 10-byte MBR identity seed.
 /// Exits the process on malformed input (wrong length or non-hex characters).
 fn parse_identity_hex(s: &str) -> [u8; 10] {
@@ -271,6 +338,13 @@ struct SearchContext {
     model_bytes: [u8; MODEL_LEN],
     sv_bytes: [u8; 4],
     targets: Arc<Vec<targets::Target>>,
+    /// `Some` only in full-mbr_val-sweep mode (no `--identity` given); `targets` above is
+    /// left empty in that case. See `sweep_check_match`.
+    raw_targets: Option<Arc<Vec<targets::RawTarget>>>,
+    /// `Some` only in full-mbr_val-sweep mode -- pairs with `raw_targets`.
+    mbr_table: Option<Arc<mbr_table::MbrTable>>,
+    /// How numeric candidate serials are padded to `SERIAL_LEN` bytes -- see `SerialPad`.
+    serial_pad: SerialPad,
     mix_lo: u32,
     mix_hi: u32,
     max_collisions: usize,
@@ -313,6 +387,22 @@ fn increment_bcd(buf: &mut [u8; SERIAL_LEN]) {
     }
 }
 
+/// Convert a zero-padded 20-byte numeric serial (as produced by `write_serial`/
+/// `increment_bcd`) into its space-padded equivalent: strip the leading zeros (keeping at
+/// least one digit for value 0), left-justify, and right-pad with spaces to fill the rest.
+/// E.g. `"00000000000000000123"` -> `"123                 "`.
+#[inline(always)]
+fn zero_padded_to_space_padded(buf: &[u8; SERIAL_LEN]) -> [u8; SERIAL_LEN] {
+    let first_nonzero = buf
+        .iter()
+        .position(|&b| b != b'0')
+        .unwrap_or(SERIAL_LEN - 1);
+    let mut out = [SPACE_PADDING; SERIAL_LEN];
+    let sig_len = SERIAL_LEN - first_nonzero;
+    out[..sig_len].copy_from_slice(&buf[first_nonzero..]);
+    out
+}
+
 /// Valid Serial characters: `[0-9A-Za-z-]`
 fn is_valid_serial(s: &str) -> bool {
     s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
@@ -339,7 +429,10 @@ fn build_serial_bytes(serial: &str) -> [u8; SERIAL_LEN] {
             serial, SERIAL_LEN
         );
     }
-    let is_numeric = sb.iter().all(|b| b.is_ascii_digit());
+    // `.all()` on an empty slice is vacuously true; treat empty as non-numeric so it
+    // takes the space-padding branch below, matching keyman's zero-fill-then-pad
+    // behavior for an empty disk serial (see the test above for disassembly evidence).
+    let is_numeric = !sb.is_empty() && sb.iter().all(|b| b.is_ascii_digit());
     if is_numeric {
         // Pure digits: left-pad with '0'
         let mut bytes = [b'0'; SERIAL_LEN];
@@ -387,7 +480,7 @@ fn disk_bytes_to_sector_val(total_bytes: u64) -> u32 {
 /// disk sizes.
 fn sector_val_for_bus(bus: BusType, total_bytes: u64) -> u32 {
     match bus {
-        BusType::Ide => disk_bytes_to_sector_val(total_bytes),
+        BusType::Ide | BusType::Nvme => disk_bytes_to_sector_val(total_bytes),
         BusType::Scsi => 0,
     }
 }
@@ -420,8 +513,11 @@ fn main() {
             from,
             identity,
             bus,
+            mbr_table,
+            serial_pad,
         } => cmd_search(
-            disk_size, unit, threads, model, keys, count, from, identity, bus,
+            disk_size, unit, threads, model, keys, count, from, identity, bus, mbr_table,
+            serial_pad,
         ),
         Commands::Sig2key { signature_hex } => cmd_sig2key(&signature_hex),
         Commands::Key2sig { key_file_or_text } => cmd_key2sig(&key_file_or_text),
@@ -453,7 +549,7 @@ fn main() {
 
 /// Execute the collision search
 fn cmd_search(
-    disk_size: u64,
+    disk_size: Option<u64>,
     unit: SizeUnit,
     threads: Option<usize>,
     model: Option<String>,
@@ -462,9 +558,10 @@ fn cmd_search(
     from: u64,
     identity: Option<String>,
     bus: BusType,
+    mbr_table_path: Option<String>,
+    serial_pad: SerialPad,
 ) {
-    validate_disk_size(disk_size, unit);
-    let (total_bytes, size_label) = disk_size_bytes_and_label(disk_size, unit);
+    let (total_bytes, size_label) = resolve_disk_size(disk_size, unit, bus);
     let sector_val = sector_val_for_bus(bus, total_bytes);
     let model = model.unwrap_or_else(|| format!("ROS{}", size_label));
     let num_threads = threads.unwrap_or_else(|| {
@@ -472,36 +569,79 @@ fn cmd_search(
             .map(|n| n.get())
             .unwrap_or(4)
     });
-    let (mix_lo, mix_hi) = resolve_mix(identity.as_deref());
-    let raw_targets = targets::load_targets(keys.as_deref(), (mix_lo, mix_hi));
     let use_simd = sha256_simd::is_avx512_supported();
     let start_serial = from * 1_000_000;
 
-    verify_6g(&raw_targets);
-    print_search_banner(
-        &size_label,
-        &model,
-        sector_val,
-        num_threads,
-        &raw_targets,
-        count,
-        start_serial,
-        use_simd,
-        identity.as_deref(),
-        bus,
-    );
+    verify_6g();
 
-    let ctx = Arc::new(SearchContext {
-        model_bytes: build_model_bytes(&model),
-        sv_bytes: sector_val.to_le_bytes(),
-        targets: Arc::new(raw_targets),
-        mix_lo,
-        mix_hi,
-        max_collisions: count,
-        stop: Arc::new(AtomicBool::new(false)),
-        found_count: Arc::new(AtomicUsize::new(0)),
-        start: Instant::now(),
-    });
+    // No --identity given: sweep all 2048 mbr_val values per candidate serial instead of a
+    // single fixed identity (decided 2026-09-07, see docs/reference/mtsc-cli-plan.md).
+    let sweep_mode = identity.is_none();
+
+    let ctx = if sweep_mode {
+        let raw_targets = targets::load_raw_targets(keys.as_deref());
+        let table = mbr_table::MbrTable::load(mbr_table_path.as_deref());
+
+        print_sweep_search_banner(
+            &size_label,
+            &model,
+            sector_val,
+            num_threads,
+            &raw_targets,
+            count,
+            start_serial,
+            use_simd,
+            bus,
+            serial_pad,
+        );
+
+        Arc::new(SearchContext {
+            model_bytes: build_model_bytes(&model),
+            sv_bytes: sector_val.to_le_bytes(),
+            targets: Arc::new(Vec::new()),
+            raw_targets: Some(Arc::new(raw_targets)),
+            mbr_table: Some(Arc::new(table)),
+            serial_pad,
+            mix_lo: 0,
+            mix_hi: 0,
+            max_collisions: count,
+            stop: Arc::new(AtomicBool::new(false)),
+            found_count: Arc::new(AtomicUsize::new(0)),
+            start: Instant::now(),
+        })
+    } else {
+        let (mix_lo, mix_hi) = resolve_mix(identity.as_deref());
+        let fixed_targets = targets::load_targets(keys.as_deref(), (mix_lo, mix_hi));
+
+        print_search_banner(
+            &size_label,
+            &model,
+            sector_val,
+            num_threads,
+            &fixed_targets,
+            count,
+            start_serial,
+            use_simd,
+            identity.as_deref(),
+            bus,
+            serial_pad,
+        );
+
+        Arc::new(SearchContext {
+            model_bytes: build_model_bytes(&model),
+            sv_bytes: sector_val.to_le_bytes(),
+            targets: Arc::new(fixed_targets),
+            raw_targets: None,
+            mbr_table: None,
+            serial_pad,
+            mix_lo,
+            mix_hi,
+            max_collisions: count,
+            stop: Arc::new(AtomicBool::new(false)),
+            found_count: Arc::new(AtomicUsize::new(0)),
+            start: Instant::now(),
+        })
+    };
 
     let handles: Vec<_> = (0..num_threads)
         .map(|tid| {
@@ -540,6 +680,7 @@ fn print_search_banner(
     use_simd: bool,
     identity: Option<&str>,
     bus: BusType,
+    serial_pad: SerialPad,
 ) {
     let mode_str = if count == 0 {
         "unlimited".to_string()
@@ -557,6 +698,9 @@ fn print_search_banner(
         BusType::Ide => {
             println!("Bus: ide (verified against real hardware; also covers sata0/AHCI)")
         }
+        BusType::Nvme => {
+            println!("Bus: nvme (same sector_val rounding as ide)")
+        }
         BusType::Scsi => {
             println!("Bus: scsi (scsi0/virtio-scsi-pci only, NOT sata0; sector_val forced to 0)");
             println!("  WARNING: this encoding is validated against 7 real boot tests on a single");
@@ -573,6 +717,12 @@ fn print_search_banner(
             hex.to_uppercase()
         ),
         None => println!("Identity: 00000000000000000000 (standard, all-zero mix)"),
+    }
+    match serial_pad {
+        SerialPad::Zero => println!("Serial pad: zero (left-pad with '0', default)"),
+        SerialPad::Space => {
+            println!("Serial pad: space (right-pad with spaces, natural digit count)")
+        }
     }
     println!(
         "Threads: {}  Targets: {}  Mode: {}  Engine: {}",
@@ -592,8 +742,76 @@ fn print_search_banner(
 
     for t in targets {
         println!(
-            "  {} need_lo=0x{:08X} need_hi=0x{:02X}",
+            "  {} need_lo=0x{:08X} need_hi=0x{:03X}",
             t.name, t.need_lo, t.need_hi
+        );
+    }
+    println!("\nSearching...\n");
+}
+
+/// Print search startup info for full-mbr_val-sweep mode (no fixed `--identity`)
+fn print_sweep_search_banner(
+    disk_label: &str,
+    model: &str,
+    sector_val: u32,
+    num_threads: usize,
+    targets: &[targets::RawTarget],
+    count: usize,
+    start_serial: u64,
+    use_simd: bool,
+    bus: BusType,
+    serial_pad: SerialPad,
+) {
+    let mode_str = if count == 0 {
+        "unlimited".to_string()
+    } else {
+        format!("find {}", count)
+    };
+    let engine = if use_simd { "AVX-512 x16" } else { "scalar" };
+
+    println!("=== RouterOS L6 Serial Generator (mbr_val full-space sweep) ===");
+    println!(
+        "Disk: {}  Model: {}  SV: 0x{:X}",
+        disk_label, model, sector_val
+    );
+    match bus {
+        BusType::Ide => {
+            println!("Bus: ide (verified against real hardware; also covers sata0/AHCI)")
+        }
+        BusType::Nvme => println!("Bus: nvme (same sector_val rounding as ide)"),
+        BusType::Scsi => {
+            println!("Bus: scsi (scsi0/virtio-scsi-pci only, NOT sata0; sector_val forced to 0)")
+        }
+    }
+    println!(
+        "Identity: sweeping all 2048 mbr_val values per candidate serial (no fixed --identity)"
+    );
+    match serial_pad {
+        SerialPad::Zero => println!("Serial pad: zero (left-pad with '0', default)"),
+        SerialPad::Space => {
+            println!("Serial pad: space (right-pad with spaces, natural digit count)")
+        }
+    }
+    println!(
+        "Threads: {}  Targets: {}  Mode: {}  Engine: {}",
+        num_threads,
+        targets.len(),
+        mode_str,
+        engine
+    );
+    if start_serial > 0 {
+        println!(
+            "Start: {}M (serial {})",
+            start_serial / 1_000_000,
+            start_serial
+        );
+    }
+    println!();
+
+    for t in targets {
+        println!(
+            "  {} tv_lo=0x{:08X} tv_hi=0x{:02X}",
+            t.name, t.tv_lo, t.tv_hi
         );
     }
     println!("\nSearching...\n");
@@ -607,10 +825,21 @@ fn search_scalar(tid: usize, num_threads: usize, start_serial: u64, ctx: &Search
     let step = num_threads as u64;
     let mut i: u64 = start_serial + tid as u64;
 
-    // sid_hi pre-filter table: most hashes never enter check_match
-    let mut hi_lookup = [false; 256];
-    for t in ctx.targets.iter() {
-        hi_lookup[t.need_hi as usize] = true;
+    let sweep_mode = ctx.raw_targets.is_some();
+
+    // sid_hi pre-filter table: only effective in fixed-mix mode. With a full mbr_val sweep
+    // the effective mix varies per candidate, so sid_hi alone can't reject most of them --
+    // skip building/using it entirely in sweep mode (see sweep_check_match). Indexed by
+    // the full `(sid_hi|0x100)` value (always in 256..512, see `Target::need_hi`'s doc
+    // comment) -- targets whose `need_hi` falls outside `0..512` can never match under
+    // this fixed mix and are simply never marked, not an error.
+    let mut hi_lookup = [false; 512];
+    if !sweep_mode {
+        for t in ctx.targets.iter() {
+            if (t.need_hi as usize) < hi_lookup.len() {
+                hi_lookup[t.need_hi as usize] = true;
+            }
+        }
     }
 
     loop {
@@ -618,10 +847,17 @@ fn search_scalar(tid: usize, num_threads: usize, start_serial: u64, ctx: &Search
             return;
         }
 
-        write_serial((&mut buf[..SERIAL_LEN]).try_into().unwrap(), i);
+        let mut serial_buf = [b'0'; SERIAL_LEN];
+        write_serial(&mut serial_buf, i);
+        if ctx.serial_pad == SerialPad::Space {
+            serial_buf = zero_padded_to_space_padded(&serial_buf);
+        }
+        buf[..SERIAL_LEN].copy_from_slice(&serial_buf);
         let (sid_lo, sid_hi) = sha256::hash_40(&buf);
 
-        if hi_lookup[sid_hi as usize] {
+        if sweep_mode {
+            sweep_check_match(i, sid_lo, sid_hi, ctx);
+        } else if hi_lookup[(sid_hi as usize) | 0x100] {
             check_match(i, sid_lo, sid_hi, ctx);
         }
 
@@ -633,11 +869,27 @@ fn search_scalar(tid: usize, num_threads: usize, start_serial: u64, ctx: &Search
     }
 }
 
+/// Non-x86_64 stub: `sha256_simd::is_avx512_supported()` always returns `false` there, so
+/// `cmd_search` never takes the `use_simd` branch that calls this -- exists only so the
+/// crate compiles for non-x86_64 targets (e.g. Apple Silicon), which always use the scalar
+/// engine.
+///
+/// # Safety
+///
+/// Never actually unsafe to call (it just panics), but keeps the same signature/safety
+/// contract as the real x86_64 implementation for the call site that doesn't branch on
+/// target_arch.
+#[cfg(not(target_arch = "x86_64"))]
+unsafe fn search_simd(_tid: usize, _num_threads: usize, _start_serial: u64, _ctx: &SearchContext) {
+    unreachable!("search_simd has no non-x86_64 implementation; use_simd must be false here");
+}
+
 /// AVX-512 SIMD search (computes 16 serials in parallel per batch)
 ///
 /// # Safety
 ///
 /// The caller must ensure the CPU supports AVX-512F.
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f", enable = "avx512bw")]
 unsafe fn search_simd(tid: usize, num_threads: usize, start_serial: u64, ctx: &SearchContext) {
     let batch = SIMD_LANES as u64;
@@ -658,10 +910,16 @@ unsafe fn search_simd(tid: usize, num_threads: usize, start_serial: u64, ctx: &S
     let mut base_serial = [b'0'; SERIAL_LEN];
     write_serial(&mut base_serial, base);
 
-    // sid_hi pre-filter table: most batches have no match, skipping check_match for all 16 lanes
-    let mut hi_lookup = [false; 256];
-    for t in ctx.targets.iter() {
-        hi_lookup[t.need_hi as usize] = true;
+    let sweep_mode = ctx.raw_targets.is_some();
+
+    // sid_hi pre-filter table: only effective in fixed-mix mode (see search_scalar).
+    let mut hi_lookup = [false; 512];
+    if !sweep_mode {
+        for t in ctx.targets.iter() {
+            if (t.need_hi as usize) < hi_lookup.len() {
+                hi_lookup[t.need_hi as usize] = true;
+            }
+        }
     }
 
     loop {
@@ -674,7 +932,12 @@ unsafe fn search_simd(tid: usize, num_threads: usize, start_serial: u64, ctx: &S
         let mut lane_serial = base_serial;
         for lane in 0..SIMD_LANES {
             serials[lane] = base + lane as u64;
-            inputs[lane][..SERIAL_LEN].copy_from_slice(&lane_serial);
+            let bytes = if ctx.serial_pad == SerialPad::Space {
+                zero_padded_to_space_padded(&lane_serial)
+            } else {
+                lane_serial
+            };
+            inputs[lane][..SERIAL_LEN].copy_from_slice(&bytes);
             increment_bcd(&mut lane_serial);
         }
 
@@ -683,7 +946,9 @@ unsafe fn search_simd(tid: usize, num_threads: usize, start_serial: u64, ctx: &S
 
         // Check each lane for a match
         for lane in 0..SIMD_LANES {
-            if hi_lookup[result.sid_hi[lane] as usize] {
+            if sweep_mode {
+                sweep_check_match(serials[lane], result.sid_lo[lane], result.sid_hi[lane], ctx);
+            } else if hi_lookup[(result.sid_hi[lane] as usize) | 0x100] {
                 check_match(serials[lane], result.sid_lo[lane], result.sid_hi[lane], ctx);
             }
         }
@@ -707,17 +972,62 @@ unsafe fn search_simd(tid: usize, num_threads: usize, start_serial: u64, ctx: &S
 /// Check whether a hash result matches any target (only formats serial on a hit)
 fn check_match(serial_num: u64, sid_lo: u32, sid_hi: u8, ctx: &SearchContext) {
     for t in ctx.targets.iter() {
-        if sid_hi == t.need_hi && sid_lo == t.need_lo {
+        if ((sid_hi as u32) | 0x100) == t.need_hi && sid_lo == t.need_lo {
             let n = ctx.found_count.fetch_add(1, Ordering::Relaxed) + 1;
             let sid = compute_software_id(sid_lo, sid_hi, ctx.mix_lo, ctx.mix_hi);
 
-            let mut sbuf = [0u8; SERIAL_LEN];
+            let mut sbuf = [b'0'; SERIAL_LEN];
             write_serial(&mut sbuf, serial_num);
+            if ctx.serial_pad == SerialPad::Space {
+                sbuf = zero_padded_to_space_padded(&sbuf);
+            }
             let serial_str = std::str::from_utf8(&sbuf).unwrap();
 
             println!(
                 "FOUND [{}] serial={} target={} verified={}",
                 n, serial_str, t.name, sid
+            );
+
+            if ctx.max_collisions > 0 && n >= ctx.max_collisions {
+                ctx.stop.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// Check a hash result against every raw target across the full mbr_val space (0-2047) --
+/// used when `search` is run without `--identity`. Unlike `check_match`'s single-fixed-mix
+/// comparison, this can find a hit for any mbr_val, not just the one a fixed identity bakes in.
+///
+/// TODO: reports every feasible target for this serial rather than stopping at the first
+/// (decided 2026-09-07) -- change to first-match-wins if multi-target hits per serial turn
+/// out noisy in practice. At current target counts this is astronomically rare either way.
+fn sweep_check_match(serial_num: u64, sid_lo: u32, sid_hi: u8, ctx: &SearchContext) {
+    let raw_targets = ctx
+        .raw_targets
+        .as_ref()
+        .expect("sweep_check_match requires SearchContext::raw_targets");
+    let mbr_table = ctx
+        .mbr_table
+        .as_ref()
+        .expect("sweep_check_match requires SearchContext::mbr_table");
+
+    for t in raw_targets.iter() {
+        let required = targets::required_mix(sid_lo, sid_hi, t.tv_lo, t.tv_hi);
+        if let Some(mbr_val) = targets::feasible_mbr_val(required) {
+            let n = ctx.found_count.fetch_add(1, Ordering::Relaxed) + 1;
+
+            let mut sbuf = [b'0'; SERIAL_LEN];
+            write_serial(&mut sbuf, serial_num);
+            if ctx.serial_pad == SerialPad::Space {
+                sbuf = zero_padded_to_space_padded(&sbuf);
+            }
+            let serial_str = std::str::from_utf8(&sbuf).unwrap();
+            let (identity_hex, marker_hex) = mbr_table.lookup(mbr_val);
+
+            println!(
+                "FOUND [{}] serial={} target={} mbr_val={} identity={} marker={}",
+                n, serial_str, t.name, mbr_val, identity_hex, marker_hex
             );
 
             if ctx.max_collisions > 0 && n >= ctx.max_collisions {
@@ -817,7 +1127,7 @@ fn print_metadata(signature_hex: &str) {
 /// Check whether a given serial matches a known signature
 fn cmd_check(
     serial: &str,
-    disk_size: u64,
+    disk_size: Option<u64>,
     unit: SizeUnit,
     model: Option<String>,
     keys: Option<String>,
@@ -825,8 +1135,7 @@ fn cmd_check(
     bus: BusType,
     license: Option<String>,
 ) {
-    validate_disk_size(disk_size, unit);
-    let (total_bytes, size_label) = disk_size_bytes_and_label(disk_size, unit);
+    let (total_bytes, size_label) = resolve_disk_size(disk_size, unit, bus);
     let sector_val = sector_val_for_bus(bus, total_bytes);
     let model = model.unwrap_or_else(|| format!("ROS{}", size_label));
     let (mix_lo, mix_hi) = resolve_mix(identity.as_deref());
@@ -857,6 +1166,7 @@ fn cmd_check(
     println!("Disk:   {} (SV: 0x{:X})", size_label, sector_val);
     match bus {
         BusType::Ide => println!("Bus:    ide (verified against real hardware; also covers sata0/AHCI)"),
+        BusType::Nvme => println!("Bus:    nvme (same sector_val rounding as ide)"),
         BusType::Scsi => println!("Bus:    scsi (scsi0/virtio-scsi-pci only, NOT sata0; sector_val forced to 0 -- see docs/license-internals.md §8.11-8.20)"),
     }
     println!("-----------");
@@ -871,7 +1181,7 @@ fn cmd_check(
 
     let matched = search_targets
         .iter()
-        .find(|t| sid_hi == t.need_hi && sid_lo == t.need_lo);
+        .find(|t| ((sid_hi as u32) | 0x100) == t.need_hi && sid_lo == t.need_lo);
 
     if let Some(t) = matched {
         println!("\n✅ Matched signature: {}", t.name);
@@ -977,7 +1287,7 @@ fn cmd_verify() {
 }
 
 /// Startup self-check: verify the 6G VMware known hash value
-fn verify_6g(targets: &[targets::Target]) {
+fn verify_6g() {
     let mut serial_bytes = [b'0'; SERIAL_LEN];
     serial_bytes[..20].copy_from_slice(b"00000000000000000001");
     let model_bytes = *b"VMware Virtual I";
@@ -990,12 +1300,6 @@ fn verify_6g(targets: &[targets::Target]) {
             sid_lo, sid_hi
         );
         std::process::exit(1);
-    }
-    if let Some(t) = targets
-        .iter()
-        .find(|t| t.need_lo == sid_lo && t.need_hi == sid_hi)
-    {
-        let _ = t; // hash matches a configured target; nothing further to check
     }
 }
 
@@ -1149,6 +1453,54 @@ mod tests {
         assert_eq!(&buf, b"18446744073709551615");
     }
 
+    // ---- zero_padded_to_space_padded ----
+
+    #[test]
+    fn test_zero_padded_to_space_padded_zero() {
+        let mut buf = [0u8; SERIAL_LEN];
+        write_serial(&mut buf, 0);
+        let out = zero_padded_to_space_padded(&buf);
+        assert_eq!(&out, b"0                   ");
+    }
+
+    #[test]
+    fn test_zero_padded_to_space_padded_short() {
+        let mut buf = [0u8; SERIAL_LEN];
+        write_serial(&mut buf, 123);
+        let out = zero_padded_to_space_padded(&buf);
+        assert_eq!(&out, b"123                 ");
+    }
+
+    #[test]
+    fn test_zero_padded_to_space_padded_matches_earlier_real_disk_case() {
+        // The exact scenario this feature was requested for: serial=25828501 on a real
+        // disk was observed to NOT be zero-padded by the controller (a short zero-padded
+        // vs. unpadded serial produced different SOFTWARE IDs when boot-tested on a real
+        // VM this session) -- confirming what the space-padded form should look like.
+        let mut buf = [0u8; SERIAL_LEN];
+        write_serial(&mut buf, 25828501);
+        let out = zero_padded_to_space_padded(&buf);
+        assert_eq!(&out, b"25828501            ");
+    }
+
+    #[test]
+    fn test_zero_padded_to_space_padded_full_length_no_zeros_stripped() {
+        // A 20-digit value with no leading zeros: nothing to strip, output == input.
+        let mut buf = [0u8; SERIAL_LEN];
+        write_serial(&mut buf, u64::MAX); // "18446744073709551615", 20 digits, leads with '1'
+        let out = zero_padded_to_space_padded(&buf);
+        assert_eq!(&out, &buf);
+    }
+
+    #[test]
+    fn test_zero_padded_to_space_padded_leading_zero_digit_preserved() {
+        // A significant digit that happens to be '0' (not a leading-zero pad byte) must
+        // survive -- only the *leading* run of zero pad bytes is stripped.
+        let buf = *b"00000000000000010203";
+        let out = zero_padded_to_space_padded(&buf);
+        assert_eq!(&out, b"10203               ");
+    }
+
     // ---- increment_bcd ----
 
     #[test]
@@ -1236,7 +1588,10 @@ mod tests {
 
         // Plant the needle: the target is whatever SOFTWARE ID candidate NEEDLE_IDX
         // produces under NEEDLE_MBR_VAL. Computed directly (not via encode/decode --
-        // those have their own tests) as the raw (target_lo, target_hi) pair.
+        // those have their own tests) as the raw (target_lo, target_hi) pair, matching
+        // `compute_software_id`'s real, hardware-confirmed formula (full width,
+        // `(sid_hi|0x100) XOR mix_hi` -- see targets::required_mix's doc comment,
+        // 2026-09-07 real-VM confirmation).
         let (needle_sid_lo, needle_sid_hi) = candidates[NEEDLE_IDX];
         let needle_mix = (NEEDLE_MBR_VAL as u64) * MIX_MULTIPLIER;
         let needle_mix_lo = needle_mix as u32;
@@ -1260,8 +1615,6 @@ mod tests {
         }
 
         // Approach B: feasibility check per candidate, no sweep.
-        // NOTE: `target_hi` must NOT be masked to 8 bits here -- `final_hi` carries the
-        // `|0x100` bit plus mix_hi's own up-to-5-bit range, so it can exceed a byte.
         let mut hits_b: Vec<(usize, u32)> = Vec::new();
         for (i, &(sid_lo, sid_hi)) in candidates.iter().enumerate() {
             let required_mix_lo = sid_lo ^ target_lo;
@@ -1348,7 +1701,10 @@ mod tests {
                 let buf = build_input_buf(&serial_bytes, &model_bytes, &sector_val.to_le_bytes());
                 let (sid_lo, sid_hi) = sha256::hash_40(&buf);
 
-                // Approach A: sweep all 2048 mbr_val, check against every target.
+                // Approach A: sweep all 2048 mbr_val, check against every target. Matches
+                // `compute_software_id`'s real, hardware-confirmed full-width formula
+                // (`(sid_hi|0x100) XOR mix_hi`, see targets::required_mix's doc comment,
+                // 2026-09-07).
                 let mut hits_a: Vec<(String, u32)> = Vec::new();
                 for mbr_val in 0u32..2048 {
                     let mix = (mbr_val as u64) * MIX_MULTIPLIER;
@@ -1467,6 +1823,17 @@ mod tests {
         assert_eq!(bytes[19], SPACE_PADDING);
     }
 
+    #[test]
+    fn test_build_serial_bytes_empty_matches_keyman_space_padding() {
+        // keyman zero-fills its 20-byte serial buffer before reading the disk, then
+        // sweeps the whole buffer turning every zero byte into a space -- an empty
+        // (zero-length) serial therefore becomes 20 ASCII spaces, not 20 '0' chars.
+        // Confirmed via keyman_x86_7.24.1 disassembly (zero-fill at 0x8050411-0x805041e,
+        // pad loop at 0x8050a1e-0x8050a29, which never special-cases length 0).
+        let bytes = build_serial_bytes("");
+        assert_eq!(&bytes, &[SPACE_PADDING; SERIAL_LEN]);
+    }
+
     // ---- parse_identity_hex / resolve_mix ----
 
     #[test]
@@ -1546,6 +1913,9 @@ mod tests {
             model_bytes: [SPACE_PADDING; MODEL_LEN],
             sv_bytes: [0; 4],
             targets: Arc::new(targets),
+            raw_targets: None,
+            mbr_table: None,
+            serial_pad: SerialPad::Zero,
             mix_lo,
             mix_hi,
             max_collisions: 0,
@@ -1558,7 +1928,7 @@ mod tests {
     fn make_fake_target() -> targets::Target {
         targets::Target {
             need_lo: 0x0B49EC2E,
-            need_hi: 0x35,
+            need_hi: 0x135, // 0x35 | 0x100 -- full-width need_hi, see Target::need_hi's doc
             name: "TEST-0001".to_string(),
             signature_hex: "AA".repeat(64),
         }
@@ -1589,10 +1959,49 @@ mod tests {
     }
 
     #[test]
+    fn test_search_scalar_finds_space_padded_target() {
+        let model_bytes = [SPACE_PADDING; MODEL_LEN];
+        let sv_bytes = [0u8; 4];
+
+        // Plant a target at serial=7 using SPACE padding ("7" + 19 spaces), not the
+        // default zero padding.
+        let mut zero_buf = [b'0'; SERIAL_LEN];
+        write_serial(&mut zero_buf, 7);
+        let space_buf = zero_padded_to_space_padded(&zero_buf);
+        let buf = build_input_buf(&space_buf, &model_bytes, &sv_bytes);
+        let (sid_lo, sid_hi) = sha256::hash_40(&buf);
+
+        let need_lo = sid_lo;
+        let need_hi = (sid_hi as u32) | 0x100;
+        let make_target = || targets::Target {
+            need_lo,
+            need_hi,
+            name: "SPACE-TEST".to_string(),
+            signature_hex: "00".repeat(64),
+        };
+
+        // With --serial-pad space, search_scalar must find it at serial index 7.
+        let mut ctx = make_test_ctx(vec![make_target()]);
+        ctx.serial_pad = SerialPad::Space;
+        ctx.max_collisions = 1;
+        ctx.model_bytes = model_bytes;
+        ctx.sv_bytes = sv_bytes;
+        search_scalar(0, 1, 0, &ctx);
+        assert_eq!(ctx.found_count.load(Ordering::Relaxed), 1);
+        assert!(ctx.stop.load(Ordering::Relaxed));
+
+        // The same target's hash must NOT be produced by the default zero-padded serial=7
+        // ("00000000000000000007") -- confirms the two padding modes genuinely diverge.
+        let zero_input_buf = build_input_buf(&zero_buf, &model_bytes, &sv_bytes);
+        let (zero_sid_lo, zero_sid_hi) = sha256::hash_40(&zero_input_buf);
+        assert!(zero_sid_lo != need_lo || ((zero_sid_hi as u32) | 0x100) != need_hi);
+    }
+
+    #[test]
     fn test_check_match_stops_at_target_count() {
         let mut ctx = make_test_ctx(vec![targets::Target {
             need_lo: 0xAAAAAAAA,
-            need_hi: 0xBB,
+            need_hi: 0x1BB, // 0xBB | 0x100
             name: "TEST".to_string(),
             signature_hex: "00".repeat(64),
         }]);

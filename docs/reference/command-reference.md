@@ -1,16 +1,16 @@
 # Command Reference
 
-Every `ros-serialgen` subcommand and flag, explained. Use this when you need to know exactly what a parameter does before running it.
+Every `mtsc` subcommand and flag, explained. Use this when you need to know exactly what a parameter does before running it.
 
 For PVE/QEMU deployment commands (`qm`, `qemu-img`, `qemu-nbd`, `dd`, `lvcreate`, etc.), see the inline explanations in [deployment-guide.md](../guides/x86-install.md).
 
 ---
 
-## `ros-serialgen search`
+## `mtsc search`
 
 ```bash
-ros-serialgen search --disk-size 100 --unit g --threads 16 --count 0 --keys keys.toml
-ros-serialgen search --disk-size 128 --unit m --threads 16 --count 0 --keys keys.toml
+mtsc search --disk-size 100 --unit g --threads 16 --count 0 --keys keys.toml
+mtsc search --disk-size 128 --unit m --threads 16 --count 0 --keys keys.toml
 ```
 
 | Flag | Long form | Meaning |
@@ -40,10 +40,10 @@ Decimal sizes are not supported (`-s` is an integer) -- fractional GB values mus
 
 Progress is logged every 10,000M (10 billion) hashes, e.g. `10000M hashes, 5s, 0 found`. At ~2000M hash/s (AVX-512) that's roughly every 5 seconds; at ~100M hash/s (scalar) roughly every 100 seconds.
 
-## `ros-serialgen check`
+## `mtsc check`
 
 ```bash
-ros-serialgen check --serial 00000000090681934458 --disk-size 24 --unit g --model cheerlon
+mtsc check --serial 00000000090681934458 --disk-size 24 --unit g --model cheerlon
 ```
 
 | Flag | Long form | Meaning |
@@ -58,20 +58,20 @@ ros-serialgen check --serial 00000000090681934458 --disk-size 24 --unit g --mode
 
 Prints the computed SOFTWARE ID, and if it matches a known signature, the License Key and MBR hex. When `-i` is given, the printed MBR hex uses that identity instead of the standard all-zero header -- but still assumes standard `BDE800000000` for marker/reserved, which is only correct if you know that's what the source device actually used (see the note above). The `keys.toml` match lookup (`✅ Matched signature: ...`) correctly accounts for `-i`'s mix when comparing.
 
-## `ros-serialgen sig2key <signature_hex>`
+## `mtsc sig2key <signature_hex>`
 
 Positional argument: a 128-character hex string (64 bytes) -- the signature from the [Signature Table](../database/collision-database.md#signature-table). Prints the corresponding `-----BEGIN MIKROTIK SOFTWARE KEY-----...` block to stdout.
 
 Also prints `SOFTWARE-ID`/`VERSION`/`LEVEL` to **stderr** (so stdout stays exactly the key text, safe to redirect or copy/paste as-is) -- decrypted from the signature's first 16 bytes, confirming what SOFTWARE ID and license level this signature actually corresponds to. See [license-internals.md §8.21](../investigation/license-internals.md#821-signature-metadata-decryption-mt_transform) for how this works.
 
-## `ros-serialgen key2sig <key_file>`
+## `mtsc key2sig <key_file>`
 
 Positional argument: path to a `.key` file containing MikroTik key text. Prints the 128-character signature hex to stdout, and the same `SOFTWARE-ID`/`VERSION`/`LEVEL` metadata to stderr as `sig2key` above.
 
-## `ros-serialgen verify`
+## `mtsc verify`
 
 ```bash
-ros-serialgen verify
+mtsc verify
 ```
 
 No arguments, no `keys.toml` needed -- this is a self-contained sanity check, unrelated to real signatures or collision search.

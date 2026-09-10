@@ -31,7 +31,7 @@ Ten valid signatures have been recovered. Each signature is valid for any disk t
 00000000000000000000BDE800000000E67A8F47AE86672FAE6D91DF19221453B34FE40E23F19E917107C449DDCB1D2061521816AD7730671B4CB226F1B0DB7448923C6297C49BDB3CCBF40AECBBCF0B
 ```
 
-**Key text:** generate on demand with `ros-serialgen sig2key <signature-hex-above>`.
+**Key text:** generate on demand with `mtsc sig2key <signature-hex-above>`.
 
 ### 4MZF-SFTR
 
@@ -40,7 +40,7 @@ Ten valid signatures have been recovered. Each signature is valid for any disk t
 00000000000000000000BDE800000000080342D34683448A1C8E3952E5A5D315F1C5FB4E4EB419C94FB88170DF0290EE3F4DFB796ECA3034D93E934B3FC27169D6506C88F23FE508B26F83546C335A05
 ```
 
-**Key text:** generate on demand with `ros-serialgen sig2key <signature-hex-above>`.
+**Key text:** generate on demand with `mtsc sig2key <signature-hex-above>`.
 
 ### HHJH-UFWL
 
@@ -49,7 +49,7 @@ Ten valid signatures have been recovered. Each signature is valid for any disk t
 00000000000000000000BDE800000000B08F6DA0CE6D8A13357403F0146B1DD227C5DEBFBD1B8260BE38DB0016D8B0BD110B34457997C8AC956FB7551081C1CB8DA79C0E6160A8DFE79F6FC38E543905
 ```
 
-**Key text:** generate on demand with `ros-serialgen sig2key <signature-hex-above>`.
+**Key text:** generate on demand with `mtsc sig2key <signature-hex-above>`.
 
 ### C7CU-PGT9
 
@@ -58,7 +58,7 @@ Ten valid signatures have been recovered. Each signature is valid for any disk t
 00000000000000000000BDE800000000F4E11772DEEAED8AF43668DA5EBDAD0846B694FFE9E77EFAE77E11A6049E4303B0B09DCEF8D9A647D643D1BAD4AF13B9659CCB11A06D3A9080096634E4E88B07
 ```
 
-**Key text:** generate on demand with `ros-serialgen sig2key <signature-hex-above>`.
+**Key text:** generate on demand with `mtsc sig2key <signature-hex-above>`.
 
 ### ZJ3M-ESHW
 
@@ -67,7 +67,7 @@ Ten valid signatures have been recovered. Each signature is valid for any disk t
 00000000000000000000BDE800000000E789138FE2AD5DF78DA962BD6810DF9D68C580F937F33B1CD409402CCD956EFD38825E198A1C4F7D82216CC99142BC0F8960835E6742225E2DCD6A45AA561806
 ```
 
-**Key text:** generate on demand with `ros-serialgen sig2key <signature-hex-above>`.
+**Key text:** generate on demand with `mtsc sig2key <signature-hex-above>`.
 
 ### G353-EXPG
 
@@ -76,9 +76,9 @@ Ten valid signatures have been recovered. Each signature is valid for any disk t
 00000000000000000000BDE800000000993D2B07CBF4A90DE4B6AFEFDEC54C03BF4BFB11DB52C232E0675A5DB3F67FB7D575950718A9AC4A6C2C1C986E9B2A1F3884AEF07805A2FDFAA6A3B1B0AC9C09
 ```
 
-**Key text:** generate on demand with `ros-serialgen sig2key <signature-hex-above>`.
+**Key text:** generate on demand with `mtsc sig2key <signature-hex-above>`.
 
-Source: [issue #1](https://github.com/cheebun/ros-serialgen/issues/1) (MurVlad). Verified on PVE VM 314 (24G, `ROS24G`, `00000001384936780264`, standard all-zero identity): `/system license print` shows `software-id: G353-EXPG`, `nlevel: 6`, no `expires-in` -- confirmed L6, the 8th working L6 SOFTWARE ID in this project. (An earlier note in this doc attributed this specific verification to the same VM 314 boot used for VI8Q-E90F below; only VI8Q-E90F had actually been checked at that time. G353-EXPG's L6 status was independently confirmed afterward.)
+Source: [issue #1](https://github.com/cheebun/mtsc/issues/1) (MurVlad). Verified on PVE VM 314 (24G, `ROS24G`, `00000001384936780264`, standard all-zero identity): `/system license print` shows `software-id: G353-EXPG`, `nlevel: 6`, no `expires-in` -- confirmed L6, the 8th working L6 SOFTWARE ID in this project. (An earlier note in this doc attributed this specific verification to the same VM 314 boot used for VI8Q-E90F below; only VI8Q-E90F had actually been checked at that time. G353-EXPG's L6 status was independently confirmed afterward.)
 
 ### VI8Q-E90F -- confirmed L1
 
@@ -87,9 +87,9 @@ Source: [issue #1](https://github.com/cheebun/ros-serialgen/issues/1) (MurVlad).
 00000000000000000000BDE800000000FAF308BA3FFD4185308A8784244749EFFE7E4E65C14C01CD55D946506B47F636757F62106D114329104012DE7B44543F3444F0E724080873E3A20E11F5EF450E
 ```
 
-**Key text:** generate on demand with `ros-serialgen sig2key <signature-hex-above>`.
+**Key text:** generate on demand with `mtsc sig2key <signature-hex-above>`.
 
-Source: [issue #1](https://github.com/cheebun/ros-serialgen/issues/1) (MurVlad). Verified on PVE VM 314 (24G, `ROS24G`, `00000000025792894646`, standard all-zero identity): `/system license print` shows `software-id: VI8Q-E90F`, `nlevel: 1`, no `expires-in` -- confirmed L1, permanent and valid.
+Source: [issue #1](https://github.com/cheebun/mtsc/issues/1) (MurVlad). Verified on PVE VM 314 (24G, `ROS24G`, `00000000025792894646`, standard all-zero identity): `/system license print` shows `software-id: VI8Q-E90F`, `nlevel: 1`, no `expires-in` -- confirmed L1, permanent and valid.
 
 ---
 
@@ -100,7 +100,7 @@ Choose your desired disk size. Note the **Serial**, **Model**, and **SOFTWARE ID
 To search for a new disk size (see [command-reference.md](../reference/command-reference.md) for the `-u` unit flag; sub-1GB sizes down to 64MB are supported via `-u m/k/b`):
 
 ```bash
-ros-serialgen search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml
+mtsc search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml
 ```
 
 ### 128M
@@ -551,7 +551,7 @@ ros-serialgen search --disk-size <N> --unit <g|m|k|b> --threads <threads> --coun
 
 ## 3. `scsi0`/`virtio-scsi-pci` Results
 
-Everything above is verified for `ide0` only -- `keyman` computes the SOFTWARE ID differently for SCSI-presented disks (see [license-internals.md §8](../investigation/license-internals.md#8-arm32-keyman-on-virtio-scsi-a-platform-specific-investigation)). Use `ros-serialgen search --bus scsi` to search specifically for this bus type; results below are **not** interchangeable with the `ide0` table.
+Everything above is verified for `ide0` only -- `keyman` computes the SOFTWARE ID differently for SCSI-presented disks (see [license-internals.md §8](../investigation/license-internals.md#8-arm32-keyman-on-virtio-scsi-a-platform-specific-investigation)). Use `mtsc search --bus scsi` to search specifically for this bus type; results below are **not** interchangeable with the `ide0` table.
 
 **Unlike `ide0`, disk size does not matter for `scsi0`** -- `sector_val` is always `0` on this path regardless of the disk's actual byte count (confirmed at both 1GiB and 2GiB, §8.19), so a single `serial=`/`product=` combo below activates on a `scsi0` disk of *any* size. No size-specific table needed.
 

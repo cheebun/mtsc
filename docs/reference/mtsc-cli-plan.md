@@ -25,8 +25,8 @@ requested; flagged here in case it comes up again later.
 
 Today, `ros-serialgen search` is one flat subcommand that performs a multi-threaded
 brute-force collision search (see [command-reference.md](command-reference.md#ros-serialgen-search)
-for its current flags). The plan restructures this into a `generate` command with three
-sub-actions, named after what the user gets rather than the mechanism used to get it.
+for its current flags). The plan restructures this into a `generate` command, named after
+what the user gets rather than the mechanism used to get it.
 
 Originally planned as a noun, `generator` (`mtsc generator serial`) -- changed to the verb
 `generate` (`mtsc generate serial`) to match standard CLI subcommand convention (verbs,
@@ -35,44 +35,62 @@ as a noun phrase modifying another noun, which is grammatically awkward as a com
 
 ```
 mtsc generate serial      # replaces `ros-serialgen search` as-is
-mtsc generate identity
-mtsc generate uuid
 ```
 
 ### `mtsc generate serial`
 
-Direct rename of the existing `search` subcommand -- same flags
-(`--size`/`--unit`/`--threads`/`--count`/`--from`/`--model`/`--keys`/`--identity`/`--bus`
--- see "Flag rename" below for the `--disk-size` -> `--size` change), same brute-force
-collision-search mechanism (can run for a long time; unchanged behavior). Renamed only
-to describe the outcome ("generate a serial that collides with a target SOFTWARE ID")
-rather than the implementation ("search for one").
+Rename of the existing `search` subcommand, plus one behavior change folded into this
+same pass (decided 2026-09-07, not deferred like `generate identity`/`generate uuid`
+above): **when `--identity` is not given, sweep all 2048 `mbr_val` values per candidate
+serial, not just the fixed standard identity.**
 
-### `mtsc generate identity`
+- Same flags as today (`--size`/`--unit`/`--threads`/`--count`/`--from`/`--model`/
+  `--keys`/`--identity`/`--bus` -- see "Flag rename" below for `--disk-size` -> `--size`),
+  plus a new `--mbr-table <path>` (default alongside `--keys`, i.e. next to `keys.toml`).
+- When `--identity` **is** given: unchanged, single fixed identity/mix, exactly today's
+  behavior.
+- When `--identity` is **not** given: for each candidate serial, run the already
+  cross-validated feasibility check (Approach B from
+  [identity-reverse-search.md](identity-reverse-search.md)) against every `--keys`
+  target across all 2048 possible `mbr_val`, instead of only the standard identity's
+  fixed `mbr_val=189`. On a hit, look up (or self-heal into) `--mbr-table` for an
+  identity/marker reproducing that `mbr_val`, and report `software_id`/`identity`/
+  `marker`/`serial`/etc. together, per the original request that started this feature
+  thread. Expected ~2048x improvement in hit probability per candidate serial, since the
+  search-space math and the Approach A vs. Approach B cross-validation (brute-force
+  sweep vs. direct feasibility check, agreeing on every real `keys.toml` target) are
+  already done and verified against the real binary this session -- only the wiring into
+  `cmd_search`'s actual loop and the `--mbr-table` self-healing loader (create-if-missing
+  from an `include_str!`-embedded default; fill gaps from that default if the file is
+  incomplete) remain unimplemented.
+- Renamed (not just behavior-extended) to describe the outcome ("generate a serial that
+  collides with a target SOFTWARE ID") rather than the implementation ("search for one").
 
-Not yet specified. Presumably generates an `identity` value (the MBR `0x100-0x109`
-field) for use with physical-hardware-style `software_id` licensing --
-either a random 10-byte value, or something that additionally satisfies a target
-`marker`/`mix` constraint. **Open question:** is this a trivial random generator, or does
-it need the same kind of exhaustive search `marker_from_identity()`'s "many-to-one"
-property enables (see [identity-marker-formula.md](identity-marker-formula.md)'s
-"Reverse direction" section -- fixing 8 bytes and brute-forcing the remaining 2 to hit a
-target `raw16`)? Needs a decision before implementing.
+### `mtsc generate identity` / `mtsc generate uuid` -- decided: out of scope, not implemented
 
-### `mtsc generate uuid`
+**Decided (2026-09-07): neither ships as part of this refactor.** Design work on both was
+carried far enough to reach a verdict, recorded here for whenever either is picked back
+up, but implementation itself is explicitly not happening now:
 
-Not yet specified. Context: CHR's `system-id` is derived from the VM's SMBIOS
-`product_uuid` plus the MBR `0x100-0x10F` region (see
-[chr-system-id-formula.md](chr-system-id-formula.md)). **Open question, same shape as
-`identity` above:** is `generator uuid` a trivial random-UUID generator (for use as a
-VM's SMBIOS UUID, with no target `system-id` in mind), or a collision-search-style
-reverse derivation (find a UUID, and/or a UUID+MBR-region combination, that produces a
-*specific target* `system-id`)? The latter would be a materially bigger implementation
-effort -- it's the CHR analogue of what `generate serial` already does for
-`software_id`, but the CHR formula's fixed-then-brute-forced search space (SMBIOS UUID:
-128 bits partly-fixed-format, plus a 16-byte MBR region) hasn't been analyzed for
-feasibility (unlike `software_id`'s well-understood ~2^64-per-marker-value collision
-density, per identity-marker-formula.md).
+- **`generate identity`** -- the design question itself is resolved: it would be a
+  targeted collision search (`--target <SOFTWARE-ID>` recovers an identity whose
+  `mbr_val` reproduces that target for a given serial/model/size; omitted, it enumerates
+  all 2048 reachable IDs and cross-checks `--keys`), not trivial random generation --
+  the math is fully worked out and cross-validated against the real binary in
+  [identity-reverse-search.md](identity-reverse-search.md) (feasibility check is
+  instant; identity recovery is a ~2048-try search over the last 2 bytes, microseconds
+  at this project's hash throughput). Despite the design being settled, it is **not
+  being implemented in this pass** -- deferred, no committed timeline.
+- **`generate uuid`** -- still genuinely undecided (trivial random UUID vs. targeted
+  `system-id` collision search), and per "Before implementing" below, that decision
+  requires working out the CHR `system-id` search-space/collision-rate math first
+  (unlike `identity`, this has not been analyzed at all: 128-bit partly-fixed-format
+  SMBIOS UUID plus a 16-byte MBR region, no pigeonhole-style density result the way
+  identity-marker-formula.md gives for `software_id`). **Not being implemented in this
+  pass**, and the prerequisite analysis is also not scheduled.
+
+Net effect on the `generate` restructuring: `mtsc generate serial` is the *only*
+`generate` sub-action shipping in this refactor.
 
 ## Flag rename: `--disk-size` -> `--size`
 
@@ -1235,11 +1253,13 @@ starts -- this is a sequencing aid, not a new commitment):
    doc reference, verified complete list below) + version bump (`0.2.0` -> `0.3.0`) +
    new `CHANGELOG.md`.
 2. **CLI restructuring + `data_encoding` (MTBase64/hex) pass**: `search` ->
-   `generate serial` (+ `generate identity`/`generate uuid` once their open questions
-   below are resolved), `sig2key`/`key2sig` -> `convert`, `verify` -> `selftest`,
-   `--disk-size` -> `--size`, all short flags removed, the `main.rs` module split --
-   **plus the `data_encoding` migration for MTBase64/hex, moved into this same pass
-   (see the ordering-bug correction below for why it can't wait until pass 3)**.
+   `generate serial` (including its new mbr_val-full-space sweep + `--mbr-table`
+   self-healing loader, decided 2026-09-07 -- see above; `generate identity`/
+   `generate uuid` themselves are explicitly out of scope, not "pending" -- see above),
+   `sig2key`/`key2sig` -> `convert`, `verify` -> `selftest`, `--disk-size` -> `--size`,
+   all short flags removed, the `main.rs` module split -- **plus the `data_encoding`
+   migration for MTBase64/hex, moved into this same pass (see the ordering-bug
+   correction below for why it can't wait until pass 3)**.
 3. **`keys.toml` parsing pass**: `toml`/`serde` for `keys.toml` (the only remaining
    dependency-migration item once `data_encoding` has moved to pass 2 above) -- this one
    has no cross-pass dependency, stays independent.
@@ -1266,11 +1286,17 @@ component.
 
 ## Before implementing
 
-- [ ] Confirm `identity` and `uuid` sub-actions: trivial generation vs. targeted
-      collision search (blocks implementation of both).
-- [ ] If either needs collision search, work out the actual search-space/collision-rate
-      math first (analogous to identity-marker-formula.md's pigeonhole analysis) before
-      committing to a CLI flag shape.
+- [x] Confirm `identity` and `uuid` sub-actions -- decided 2026-09-07: **neither ships in
+      this refactor.** `identity`'s design question is resolved (targeted collision
+      search, not trivial generation) but deferred with no timeline; `uuid` remains
+      genuinely undecided and its prerequisite search-space/collision-rate math is not
+      scheduled. See "`mtsc generate identity` / `mtsc generate uuid`" above.
+- [ ] `mtsc generate serial`'s new mbr_val-full-space behavior (decided 2026-09-07, see
+      above): wire the already-cross-validated Approach A/B feasibility check into
+      `cmd_search`'s actual candidate loop, implement the `--mbr-table <path>`
+      self-healing loader (create-if-missing from `include_str!`-embedded default,
+      fill gaps from that default if incomplete), and update hit-output to print
+      `software_id`/`identity`/`marker`/`serial` together.
 - [ ] Update all `ros-serialgen` references project-wide once the rename itself
       proceeds. **This list is now the actual verified output of
       `grep -rl "ros-serialgen" . --include="*.md" --include="*.rs" --include="*.toml"`

@@ -15,6 +15,30 @@ final          = (sid_lo XOR mix_lo, (sid_hi|0x100) XOR mix_hi)
 SOFTWARE_ID    = base35_encode(final)
 ```
 
+> **Confirmed correct, with an important structural consequence (2026-09-07):** this
+> `(sid_hi|0x100) XOR mix_hi` formula is real and hardware-confirmed -- a live VM boot
+> (RouterOS 7.24.1, `serial=573214362`, non-standard identity `00000000000000000FF4`)
+> computed the exact SOFTWARE ID this formula predicts. A same-day investigation briefly
+> suspected this formula was wrong (based on `targets::entries_to_targets`'s `& 0xFF`
+> masked comparison, which is a *different*, separately-buggy code path -- since fixed to
+> match this formula's full-width semantics) and edited this note to say so; that edit was
+> itself wrong and has been reverted.
+>
+> The real, structural consequence of the `|0x100`: since `(sid_hi|0x100)` always has bit
+> 8 set and no bits above 8, and `mix_hi` (`mbr_val * 0x3FF800F >> 32`) is always < 32 (so
+> it can only ever flip bits 0-4), a target's `tv_hi` must *already* have bit 8 set and no
+> bits above 8 -- i.e. fall in `256..512` -- for *any* `mbr_val`/identity to ever produce
+> it. This is fixed per target, not something a longer search or a different identity can
+> work around. Empirically, 59 of 131 real `keys.toml` targets (45%) decode to a `tv_hi`
+> outside that range and are therefore not reachable via this disk/MBR-based collision
+> technique for *any* serial -- most such entries are router-hardware-identity licenses
+> (e.g. the CCR1009 batch), not disk-based SOFTWARE IDs to begin with, so this reflects a
+> different licensing mechanism rather than a gap in the technique. Confirmed the hard way:
+> a sweep for `MGT2-L23Y` (`tv_hi=0x44`, outside the range) using an incorrectly-loosened
+> feasibility check reported a false-positive hit (`mbr_val=468`); booting that exact
+> combo on real hardware produced a different SOFTWARE ID (`ZTBI-ENJL`), not `MGT2-L23Y`,
+> proving the loosened check wrong and this original formula right.
+
 For a **fixed** `serial`/`model`/`size`, `sid_lo`/`sid_hi` never change -- the *only*
 thing `identity` can do is pick one of `mbr_val`'s **2048** possible values, each
 producing exactly one resulting SOFTWARE ID. So instead of an open-ended search, this

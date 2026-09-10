@@ -1,7 +1,7 @@
 # VI8Q-E90F (Level 4) — real device disk captures
 
 Two raw disk images from the same physical real x86 machine (reflashed SSD, reported in
-[github.com/cheebun/ros-serialgen issue #1](https://github.com/cheebun/ros-serialgen/issues/1),
+[github.com/cheebun/mtsc issue #1](https://github.com/cheebun/mtsc/issues/1),
 MurVlad), running RouterOS 6.49.13.
 
 

@@ -14,7 +14,7 @@
 ## Search Seeds — model `RouterOS-SCSI`, 1G
 
 ```
-ros-serialgen search --bus scsi --disk-size 1 --unit g --threads 4 --count 0 --model RouterOS-SCSI
+mtsc search --bus scsi --disk-size 1 --unit g --threads 4 --count 0 --model RouterOS-SCSI
 ```
 
 | Software ID | Serial |

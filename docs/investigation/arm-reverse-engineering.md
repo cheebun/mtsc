@@ -530,7 +530,7 @@ ARM CHR 虚拟机走的是标准虚拟磁盘（virtio-blk/scsi），应命中 §
 | CLI 选项集合 | 一致的核心项 | 额外可见 `--old-software-id` |
 
 **对本项目（PVE + SOFTWARE ID 碰撞搜索）的结论：** ARM 架构 RouterOS（CHR-ARM64 等）与 x86
-共用同一套离线授权算法与同一批签名表，**理论上 `ros-serialgen` 现有实现和 4 组已知签名
+共用同一套离线授权算法与同一批签名表，**理论上 `mtsc` 现有实现和 4 组已知签名
 （TI09-7WK3 / 4MZF-SFTR / HHJH-UFWL / C7CU-PGT9）可以直接套用于 ARM 虚拟机授权，无需为 ARM
 单独实现或重新碰撞**。建议后续用一台真实 ARM CHR/PVE 虚拟机做一次端到端验证（写入用同一
 算法生成的 MBR 数据，检查 `nlevel: 6` 是否生效）以最终坐实这一结论。

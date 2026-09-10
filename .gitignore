@@ -10,3 +10,5 @@ chr-license-data.md
 chr-system-id-formula.md
 keys.toml
 /backup/
+/logs/
+/dist/
