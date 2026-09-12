@@ -361,6 +361,45 @@ struct SearchContext {
 /// -- there is no `--alphabet` flag; every search always counts over this exact symbol set.
 const SEARCH_ALPHABET: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
+/// `SEARCH_ALPHABET[i] as usize -> i` reverse lookup, built once at compile time. Lets
+/// `increment_search_candidate` find a byte's alphabet index in O(1) (one array read)
+/// instead of the generic `increment_candidate`'s O(alphabet length) `.position()` scan --
+/// see `docs/benchmarks/README.md`'s "Future optimization opportunities". `u8::MAX` marks
+/// bytes that aren't in `SEARCH_ALPHABET` at all (never actually read for those, since
+/// every candidate byte is always a `SEARCH_ALPHABET` member by construction).
+const SEARCH_ALPHABET_REVERSE: [u8; 256] = {
+    let mut table = [u8::MAX; 256];
+    let mut i = 0;
+    while i < SEARCH_ALPHABET.len() {
+        table[SEARCH_ALPHABET[i] as usize] = i as u8;
+        i += 1;
+    }
+    table
+};
+
+/// O(1)-per-digit specialization of `increment_candidate` for the fixed `SEARCH_ALPHABET`,
+/// via `SEARCH_ALPHABET_REVERSE`. This is the one actually used by `search`'s hot loop
+/// (`SearchContext::increment_candidate` below) -- the generic `increment_candidate`
+/// function stays as the reference implementation for arbitrary alphabets, exercised by
+/// this project's own tests, and cross-validated against this fast path (see
+/// `test_increment_search_candidate_matches_generic`).
+#[inline(always)]
+fn increment_search_candidate(buf: &mut [u8; SERIAL_LEN]) {
+    const BASE: usize = SEARCH_ALPHABET.len();
+    for byte in buf.iter_mut().rev() {
+        let idx = SEARCH_ALPHABET_REVERSE[*byte as usize] as usize;
+        debug_assert!(
+            idx < BASE,
+            "buffer byte must be a member of SEARCH_ALPHABET"
+        );
+        if idx + 1 < BASE {
+            *byte = SEARCH_ALPHABET[idx + 1];
+            return;
+        }
+        *byte = SEARCH_ALPHABET[0];
+    }
+}
+
 impl SearchContext {
     /// Encode an index without changing the counter's fixed-width representation.
     #[inline]
@@ -371,7 +410,7 @@ impl SearchContext {
     /// Advance the fixed-width counter, never a space-padded hashing buffer.
     #[inline]
     fn increment_candidate(&self, serial: &mut [u8; SERIAL_LEN]) {
-        increment_candidate(serial, SEARCH_ALPHABET);
+        increment_search_candidate(serial);
     }
 
     /// Produce all 20 serial bytes while preserving the model/sector suffix.
@@ -456,6 +495,14 @@ fn write_candidate(buf: &mut [u8; SERIAL_LEN], mut n: u128, alphabet: &[u8]) {
 /// Increment a candidate buffer by 1 in the given `alphabet`'s base. Silently wraps to
 /// all-`alphabet[0]` on overflow of the whole buffer; search stops before repeating a
 /// finite small-alphabet space.
+///
+/// No longer called from production code (`SearchContext::increment_candidate` uses the
+/// O(1) `increment_search_candidate` fast path instead) -- kept only as the
+/// arbitrary-alphabet reference implementation `increment_search_candidate` is
+/// cross-validated against in tests. `#[allow(dead_code)]` per this project's own
+/// documented clippy exception (`AGENTS.md`: "cargo clippy zero warnings (except
+/// dead_code)"), since a plain (non-test) build has no callers for it at all.
+#[allow(dead_code)]
 #[inline(always)]
 fn increment_candidate(buf: &mut [u8; SERIAL_LEN], alphabet: &[u8]) {
     let base = alphabet.len();
@@ -963,6 +1010,12 @@ fn search_batch(
             }
         }
     }
+    // Reused across every `sweep_check_match` call this thread makes, so the overwhelmingly
+    // common no-hit case never allocates (`Vec::new()` doesn't allocate until first push, and
+    // `.clear()` after a rare hit keeps the capacity for next time). Keeps the per-target scan
+    // loop free of any call/allocation, which is what actually lets it stay a tight,
+    // branch-light loop -- see `sweep_check_match`'s doc comment.
+    let mut sweep_hits: Vec<(usize, u16)> = Vec::new();
 
     loop {
         if ctx.stop.load(Ordering::Relaxed) {
@@ -986,7 +1039,7 @@ fn search_batch(
         for (lane, &(sid_lo, sid_hi)) in hashes.outputs().iter().take(active).enumerate() {
             let index = base.wrapping_add(lane as u64);
             if sweep_mode {
-                sweep_check_match(index, sid_lo, sid_hi, ctx);
+                sweep_check_match(index, sid_lo, sid_hi, ctx, &mut sweep_hits);
             } else if hi_lookup[(sid_hi as usize) | 0x100] {
                 check_match(index, sid_lo, sid_hi, ctx);
             }
@@ -1072,41 +1125,69 @@ fn check_match(serial_num: u64, sid_lo: u32, sid_hi: u8, ctx: &SearchContext) {
 /// used when `search` is run without `--identity`. Unlike `check_match`'s single-fixed-mix
 /// comparison, this can find a hit for any mbr_val, not just the one a fixed identity bakes in.
 ///
+/// Split into two passes on purpose (see `docs/benchmarks/README.md`'s "Future optimization
+/// opportunities" -- this implements the first one): a hot scan over every target that does
+/// *only* arithmetic (`required_mix`/`feasible_mbr_val`, both already O(1)) with no calls, no
+/// identity lookups, and no printing, followed by a cold reporting pass that only runs for the
+/// (astronomically rare) targets the scan actually flagged. Real hits happen on the order of
+/// once per ~10^12 candidates, so keeping the scan itself free of anything but pure arithmetic
+/// is what gives the compiler its best chance to auto-vectorize it -- interleaving a `println!`/
+/// MBR-table lookup/independent-rehash call into the same loop, as the previous version did,
+/// defeats that regardless of how cheap the arithmetic itself is. `hits` is caller-owned and
+/// reused across calls so the common (empty) case never allocates.
+///
 /// TODO: reports every feasible target for this serial rather than stopping at the first
 /// (decided 2026-09-07) -- change to first-match-wins if multi-target hits per serial turn
 /// out noisy in practice. At current target counts this is astronomically rare either way.
-fn sweep_check_match(serial_num: u64, sid_lo: u32, sid_hi: u8, ctx: &SearchContext) {
+fn sweep_check_match(
+    serial_num: u64,
+    sid_lo: u32,
+    sid_hi: u8,
+    ctx: &SearchContext,
+    hits: &mut Vec<(usize, u16)>,
+) {
     let raw_targets = ctx
         .raw_targets
         .as_ref()
         .expect("sweep_check_match requires SearchContext::raw_targets");
+
+    debug_assert!(hits.is_empty(), "caller must pass a drained scratch buffer");
+    for (i, t) in raw_targets.iter().enumerate() {
+        let required = targets::required_mix(sid_lo, sid_hi, t.tv_lo, t.tv_hi);
+        if let Some(mbr_val) = targets::feasible_mbr_val(required) {
+            hits.push((i, mbr_val));
+        }
+    }
+
+    if hits.is_empty() {
+        return;
+    }
+
     let mbr_table = ctx
         .mbr_table
         .as_ref()
         .expect("sweep_check_match requires SearchContext::mbr_table");
+    for &(i, mbr_val) in hits.iter() {
+        let t = &raw_targets[i];
+        let (identity_hex, marker_hex) = mbr_table.lookup(mbr_val);
+        let mix = targets::mix_from_identity(&parse_identity_hex(identity_hex));
+        let (sbuf, sid) = verify_search_hit(serial_num, (sid_lo, sid_hi), mix, &t.name, ctx)
+            .unwrap_or_else(|error| {
+                eprintln!("FATAL: {error}");
+                std::process::exit(1);
+            });
+        let n = ctx.found_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let serial_str = std::str::from_utf8(&sbuf).unwrap();
+        println!(
+            "FOUND [{}] serial={} target={} mbr_val={} identity={} marker={} verified={}",
+            n, serial_str, t.name, mbr_val, identity_hex, marker_hex, sid
+        );
 
-    for t in raw_targets.iter() {
-        let required = targets::required_mix(sid_lo, sid_hi, t.tv_lo, t.tv_hi);
-        if let Some(mbr_val) = targets::feasible_mbr_val(required) {
-            let (identity_hex, marker_hex) = mbr_table.lookup(mbr_val);
-            let mix = targets::mix_from_identity(&parse_identity_hex(identity_hex));
-            let (sbuf, sid) = verify_search_hit(serial_num, (sid_lo, sid_hi), mix, &t.name, ctx)
-                .unwrap_or_else(|error| {
-                    eprintln!("FATAL: {error}");
-                    std::process::exit(1);
-                });
-            let n = ctx.found_count.fetch_add(1, Ordering::Relaxed) + 1;
-            let serial_str = std::str::from_utf8(&sbuf).unwrap();
-            println!(
-                "FOUND [{}] serial={} target={} mbr_val={} identity={} marker={} verified={}",
-                n, serial_str, t.name, mbr_val, identity_hex, marker_hex, sid
-            );
-
-            if ctx.max_collisions > 0 && n >= ctx.max_collisions {
-                ctx.stop.store(true, Ordering::Relaxed);
-            }
+        if ctx.max_collisions > 0 && n >= ctx.max_collisions {
+            ctx.stop.store(true, Ordering::Relaxed);
         }
     }
+    hits.clear();
 }
 
 /// Print progress to stderr
@@ -1645,6 +1726,38 @@ mod tests {
             let mut expected = [0u8; SERIAL_LEN];
             write_candidate(&mut expected, base + i, alphabet);
             assert_eq!(buf, expected, "base-36 mismatch at base+{}", i);
+        }
+    }
+
+    #[test]
+    fn test_increment_search_candidate_matches_generic() {
+        // Cross-validate the O(1)-per-digit `increment_search_candidate` (used by `search`'s
+        // hot loop) against the generic O(alphabet-length) `increment_candidate` reference,
+        // over a range that exercises single-digit, multi-digit, and full-buffer carries.
+        let mut fast_buf = [SEARCH_ALPHABET[0]; SERIAL_LEN];
+        let mut generic_buf = [SEARCH_ALPHABET[0]; SERIAL_LEN];
+        for i in 1..=200_000u32 {
+            increment_search_candidate(&mut fast_buf);
+            increment_candidate(&mut generic_buf, SEARCH_ALPHABET);
+            assert_eq!(fast_buf, generic_buf, "mismatch at step {i}");
+        }
+    }
+
+    #[test]
+    fn test_increment_search_candidate_wraps_like_generic_at_overflow() {
+        // All-'Z' (the maximum base-36 value) must wrap to all-'0' in both implementations.
+        let mut fast_buf = [b'Z'; SERIAL_LEN];
+        let mut generic_buf = [b'Z'; SERIAL_LEN];
+        increment_search_candidate(&mut fast_buf);
+        increment_candidate(&mut generic_buf, SEARCH_ALPHABET);
+        assert_eq!(fast_buf, [SEARCH_ALPHABET[0]; SERIAL_LEN]);
+        assert_eq!(fast_buf, generic_buf);
+    }
+
+    #[test]
+    fn test_search_alphabet_reverse_is_correct_inverse() {
+        for (idx, &symbol) in SEARCH_ALPHABET.iter().enumerate() {
+            assert_eq!(SEARCH_ALPHABET_REVERSE[symbol as usize] as usize, idx);
         }
     }
 

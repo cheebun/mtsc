@@ -197,6 +197,11 @@ pub fn load_raw_targets(config_path: Option<&str>) -> Vec<RawTarget> {
 /// `entries_to_targets`'s masking (not this formula) was the real, separate bug. Fixed by
 /// correcting `entries_to_targets` to full-width comparison instead, and reverting this
 /// function back to the original `|0x100` formula.)
+///
+/// `#[inline]`: called once per target per candidate in `sweep_check_match`'s hot scan
+/// loop (`main.rs`) -- explicit, rather than relying solely on `Cargo.toml`'s `lto = true`
+/// to inline it across the crate/module boundary.
+#[inline]
 pub fn required_mix(sid_lo: u32, sid_hi: u8, tv_lo: u32, tv_hi: u32) -> u64 {
     let required_lo = sid_lo ^ tv_lo;
     let required_hi = ((sid_hi as u32) | 0x100) ^ tv_hi;
@@ -231,6 +236,10 @@ const MIX_MULTIPLIER_INV: u64 = mod_inverse_pow2_64(MIX_MULTIPLIER);
 /// (only done when `candidate < 2048`, vanishingly rare) is both necessary and sufficient.
 /// Previously cross-checked against the plain-division formula for every real `mbr_val`
 /// and a large random sample.
+///
+/// `#[inline]`: same rationale as `required_mix` above -- called once per target per
+/// candidate in the same hot loop, right after it.
+#[inline]
 pub fn feasible_mbr_val(required_mix: u64) -> Option<u16> {
     let candidate = required_mix.wrapping_mul(MIX_MULTIPLIER_INV);
     if candidate < 2048 && candidate * MIX_MULTIPLIER == required_mix {

@@ -130,22 +130,41 @@ likely matter more than which SHA-256 backend is selected:
    Empirically, a real sweep-mode run against 1038 targets measured only
    ~2.1 M candidates/s even with the AVX-512 hash engine active -- far below
    what the hash alone can do (compare to the hash-only numbers above), because
-   this scan dominates. `required_mix`'s XOR/combine and `feasible_mbr_val`'s
-   64-bit multiply-and-compare are both vectorizable; batching either across
-   multiple targets or across a whole 16-lane hash result before falling back
-   to scalar per-hit confirmation is the most promising next step for sweep-mode
-   throughput -- likely a bigger win than adding further hash backends, since
-   fixed-`--identity` mode (which has a cheap O(1) `hi_lookup` pre-filter
-   already) doesn't have this bottleneck at all.
+   this scan dominates.
+
+   **Status (2026-09-13): partially addressed, not fully resolved.** Split
+   `sweep_check_match` into a hot arithmetic-only scan pass and a cold
+   MBR-lookup/verify/print pass that only runs for actual hits (previously
+   interleaved in one loop) -- a correctness-preserving refactor, cross-validated
+   against the existing `required_mix`/`feasible_mbr_val` agreement tests, zero
+   regressions. Also added `#[inline]` to `required_mix`/`feasible_mbr_val`
+   explicitly. A live A/B on the build host's 1038-target `keys.toml`
+   (~2.0 M candidates/s before and after) showed **no measurable improvement**
+   from this alone -- profiling (in progress) is needed to confirm whether the
+   scan loop is even auto-vectorizing post-refactor before deciding whether to
+   hand-write SIMD for it. Separately, a bigger algorithmic idea surfaced during
+   this same investigation: since the 2048 `mbr_val` values map to a *fixed*,
+   target-independent set of `(mix_lo, mix_hi)` pairs, the check can be inverted
+   -- for each candidate, iterate the 2048 `mbr_val` values (not the targets) and
+   look up the resulting required `(tv_lo, tv_hi)` in a `HashMap` built once from
+   `keys.toml` at startup. That makes the per-candidate cost O(2048), *decoupled
+   from `num_targets`* -- not obviously a win yet at 1038 targets, but a clear win
+   once the target count grows past ~2048 (this project's `keys.toml` has already
+   grown roughly 8x in one session). Not implemented yet; recorded here so it
+   isn't lost.
 2. **`increment_candidate`'s per-symbol carry step does an O(alphabet-length)
-   linear `.position()` scan** to find a byte's index in the configured
-   `--alphabet` (`src/main.rs`) -- cheap for the default 10-symbol alphabet, more
-   noticeable for longer ones (e.g. the 36-symbol digit+letter alphabet). A
-   precomputed 256-entry reverse lookup table (byte -> alphabet index, built
-   once per `search` invocation, not per candidate) would make this O(1),
-   mirroring the `sid_hi` lookup-table pattern already used elsewhere in this
-   project. Not yet measured as a real bottleneck (a live A/B benchmark this
-   session found no consistent difference between the default and a custom
-   alphabet's overall throughput, likely because item 1 above dominates first),
-   but it's a straightforward, low-risk fix if sweep-mode's cost is ever brought
-   down enough for this to start showing up.
+   linear `.position()` scan** to find a byte's index in the (now fixed, base-36)
+   `SEARCH_ALPHABET` (`src/main.rs`).
+
+   **Status (2026-09-13): implemented.** Added `SEARCH_ALPHABET_REVERSE`, a
+   compile-time-constructed 256-entry reverse lookup table (byte -> alphabet
+   index), and a new `increment_search_candidate` fast path that uses it --
+   O(1) per digit instead of scanning up to 36 entries. The generic
+   `increment_candidate(buf, alphabet)` function is kept as-is (still used by
+   this project's own tests against arbitrary alphabets) and now serves as the
+   reference implementation the fast path is cross-validated against
+   (`test_increment_search_candidate_matches_generic`, 200,000 consecutive
+   steps, plus an explicit all-`Z` overflow-wrap test and a reverse-table
+   correctness test). Not yet isolated in a benchmark -- item 1 above still
+   likely dominates total scan cost, so this alone may not move overall
+   throughput until item 1 is resolved.
