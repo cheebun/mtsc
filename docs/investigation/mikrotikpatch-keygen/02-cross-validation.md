@@ -1,6 +1,6 @@
 # 交叉验证记录：marker 公式与公钥常量
 
-> 目的：把本会话动态观测到的两条独立证据，与本项目 `ros-serialgen` 的既有实现逐字节比对，形成交叉验证。
+> 目的：把本会话动态观测到的两条独立证据，与本项目 `mtsc` 的既有实现逐字节比对，形成交叉验证。
 > 时间：2026-09-08
 
 ---
@@ -44,8 +44,8 @@ marker  = raw16 的低 16 位，小端序 → [u8; 2]
 ### 1.3 用本项目工具独立复算
 
 ```
-$ ./target/release/ros-serialgen check \
-    --serial 1 --disk-size 6415394816 --unit b \
+$ ./target/release/mtsc check \
+    --serial 1 --size 6415394816 --unit b \
     --model "VMware Virtual I" --identity CC112611F9AB50FEE68E
 
   Identity: CC112611F9AB50FEE68E
@@ -103,7 +103,7 @@ pub const LICENSE_PUBLIC_KEY: [u8; 32] = [
 
 ## 3. 附：`License Level = 22` 的交叉印证
 
-`keygen_x86` 在伪造 `keyman` 场景下签出的 License，经 `ros-serialgen key2sig` 解码得 `License Level: 22`。
+`keygen_x86` 在伪造 `keyman` 场景下签出的 License，经 `mtsc key2sig` 解码得 `License Level: 22`。
 
 `loskiq/MikroTikPatch` 的 `license.py::lic_gen_ros()` 中同样硬编码：
 

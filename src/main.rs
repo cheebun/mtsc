@@ -40,8 +40,14 @@ const PROGRESS_INTERVAL: u64 = 10_000_000_000;
 #[derive(Parser)]
 #[command(name = "mtsc")]
 #[command(about = "RouterOS L6 Serial Generator — collision search & key conversion")]
-#[command(version)]
+#[command(version, disable_help_flag = true, disable_version_flag = true)]
 struct Cli {
+    /// Print help (long-form only -- this project uses no short flags, see AGENTS.md)
+    #[arg(long, global = true, action = clap::ArgAction::Help)]
+    help: Option<bool>,
+    /// Print version (long-form only -- this project uses no short flags, see AGENTS.md)
+    #[arg(long, global = true, action = clap::ArgAction::Version)]
+    version: Option<bool>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -52,43 +58,37 @@ enum Commands {
     Search {
         /// Disk size magnitude (paired with --unit). Required for --bus ide/nvme; optional
         /// (and ignored) for --bus scsi, where sector_val is always forced to 0.
-        #[arg(short = 's', long = "disk-size")]
+        #[arg(long = "size")]
         disk_size: Option<u64>,
         /// Disk size unit: g (gigabytes, default), m (megabytes), k (kilobytes), or b (bytes)
-        #[arg(short = 'u', long, value_enum, ignore_case = true, default_value = "g")]
+        #[arg(long, value_enum, ignore_case = true, default_value = "g")]
         unit: SizeUnit,
         /// Thread count
-        #[arg(short, long)]
+        #[arg(long)]
         threads: Option<usize>,
         /// Model name (default: ROS<size><unit>, e.g. ROS100G, ROS128M)
-        #[arg(short, long)]
+        #[arg(long)]
         model: Option<String>,
         /// keys.toml path
-        #[arg(short, long)]
+        #[arg(long)]
         keys: Option<String>,
         /// Number of collisions to find (default: 1, 0 = unlimited)
-        #[arg(short = 'c', long, default_value = "1")]
+        #[arg(long, default_value = "1")]
         count: usize,
         /// Start from N million hashes (resume from progress output)
-        #[arg(short = 'f', long, default_value = "0")]
+        #[arg(long, default_value = "0")]
         from: u64,
         /// Non-standard 20-hex-char MBR identity seed (0x100-0x109), e.g. from a real
         /// device's captured MBR. Default: sweep all 2048 possible mbr_val values per
         /// candidate serial instead of a single fixed identity (see --mbr-table).
-        #[arg(short = 'i', long)]
+        #[arg(long)]
         identity: Option<String>,
         /// Disk bus type: ide (default, verified against real hardware -- also covers
         /// sata0/AHCI, which uses the identical encoding), nvme (same sector_val rounding
         /// as ide), or scsi (scsi0/virtio-scsi-pci specifically, NOT sata0 -- forces
         /// sector_val=0; see docs/license-internals.md §8.11-8.20; end-to-end activation
         /// confirmed on x86_64, §8.18).
-        #[arg(
-            short = 'b',
-            long,
-            value_enum,
-            ignore_case = true,
-            default_value = "ide"
-        )]
+        #[arg(long, value_enum, ignore_case = true, default_value = "ide")]
         bus: BusType,
         /// Path to the mbr_val -> identity/marker lookup table, used only when --identity is
         /// NOT given (full mbr_val sweep mode). Default: ./mbr-table.toml if present,
@@ -105,13 +105,6 @@ enum Commands {
         /// assumption.
         #[arg(long = "pad", value_enum, ignore_case = true, default_value = "end")]
         pad: PadPosition,
-        /// Ordered, distinct ASCII letters/digits for base-N counting (at least 2 symbols).
-        /// The first symbol is the zero/left-pad symbol. All alphabets use the selected
-        /// CPU backend. Search stops at alphabet_len^20 if it fits in u64; otherwise
-        /// the u64 index wraps to zero after u64::MAX (only the u64-indexed subset is searched).
-        /// Example: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ" for base 36.
-        #[arg(long = "alphabet", default_value = "0123456789")]
-        alphabet: String,
     },
     /// Convert signature_hex to Key text
     Sig2key {
@@ -136,37 +129,31 @@ enum Commands {
         serial: String,
         /// Disk size magnitude (paired with --unit). Required for --bus ide/nvme; optional
         /// (and ignored) for --bus scsi, where sector_val is always forced to 0.
-        #[arg(short = 's', long = "disk-size")]
+        #[arg(long = "size")]
         disk_size: Option<u64>,
         /// Disk size unit: g (gigabytes, default), m (megabytes), k (kilobytes), or b (bytes)
-        #[arg(short = 'u', long, value_enum, ignore_case = true, default_value = "g")]
+        #[arg(long, value_enum, ignore_case = true, default_value = "g")]
         unit: SizeUnit,
         /// Model name (default: ROS<size><unit>, e.g. ROS100G, ROS128M, ROS67108864B)
-        #[arg(short, long)]
+        #[arg(long)]
         model: Option<String>,
         /// keys.toml path
-        #[arg(short, long)]
+        #[arg(long)]
         keys: Option<String>,
         /// Non-standard 20-hex-char MBR identity seed (0x100-0x109), e.g. from a real
         /// device's captured MBR. Default: standard all-zero identity used by collision search.
-        #[arg(short = 'i', long)]
+        #[arg(long)]
         identity: Option<String>,
         /// Disk bus type: ide (default, verified against real hardware -- also covers
         /// sata0/AHCI, which uses the identical encoding), nvme (same sector_val rounding
         /// as ide), or scsi (scsi0/virtio-scsi-pci specifically, NOT sata0 -- forces
         /// sector_val=0; see docs/license-internals.md §8.11-8.20; end-to-end activation
         /// confirmed on x86_64, §8.18).
-        #[arg(
-            short = 'b',
-            long,
-            value_enum,
-            ignore_case = true,
-            default_value = "ide"
-        )]
+        #[arg(long, value_enum, ignore_case = true, default_value = "ide")]
         bus: BusType,
         /// Path to a .key license file (or a raw 128-char signature_hex file) to compare
         /// against the SOFTWARE ID computed from serial/model/disk-size/identity/bus above.
-        #[arg(short = 'l', long)]
+        #[arg(long)]
         license: Option<String>,
     },
     /// Generate a shell completion script (bash/zsh/fish/powershell/elvish) and print it to stdout
@@ -223,7 +210,7 @@ enum PadPosition {
     End,
 }
 
-/// Disk size unit, paired with the `--disk-size` magnitude
+/// Disk size unit, paired with the `--size` magnitude
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum SizeUnit {
     /// Gigabytes (1024^3 bytes)
@@ -291,7 +278,7 @@ fn disk_size_bytes_and_label(magnitude: u64, unit: SizeUnit) -> (u64, String) {
     (bytes, label)
 }
 
-/// Resolve `--disk-size`/`--unit` against the selected bus, enforcing that they're required
+/// Resolve `--size`/`--unit` against the selected bus, enforcing that they're required
 /// for buses where disk size actually affects sector_val (ide/nvme) while remaining optional
 /// (and ignored) for buses where it doesn't (scsi -- sector_val is always forced to 0).
 /// Exits the process if disk_size is missing on a bus that needs it.
@@ -299,12 +286,19 @@ fn resolve_disk_size(disk_size: Option<u64>, unit: SizeUnit, bus: BusType) -> (u
     match disk_size {
         Some(magnitude) => {
             validate_disk_size(magnitude, unit);
+            if bus.size_irrelevant() {
+                eprintln!(
+                    "Warning: --size/--unit have no effect on the SOFTWARE ID for --bus scsi \
+                     (sector_val is always 0); they only shape the default --model name. \
+                     Omit --size/--unit, or pass --model explicitly, to avoid relying on them."
+                );
+            }
             disk_size_bytes_and_label(magnitude, unit)
         }
         None if bus.size_irrelevant() => (0, "N/A (scsi, size ignored)".to_string()),
         None => {
             eprintln!(
-                "Error: --disk-size is required for --bus ide/nvme (only optional for --bus scsi)"
+                "Error: --size is required for --bus ide/nvme (only optional for --bus scsi)"
             );
             std::process::exit(1);
         }
@@ -314,19 +308,21 @@ fn resolve_disk_size(disk_size: Option<u64>, unit: SizeUnit, bus: BusType) -> (u
 /// Parse a 20-hex-char `--identity` argument into the 10-byte MBR identity seed.
 /// Exits the process on malformed input (wrong length or non-hex characters).
 fn parse_identity_hex(s: &str) -> [u8; 10] {
-    if s.len() != 20 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
-        eprintln!(
-            "Error: --identity must be exactly 20 hex characters (10 bytes), got '{}' ({} chars)",
-            s,
-            s.len()
-        );
-        std::process::exit(1);
+    let decoded = data_encoding::HEXLOWER_PERMISSIVE
+        .decode(s.as_bytes())
+        .ok()
+        .filter(|b| b.len() == 10);
+    match decoded {
+        Some(bytes) => bytes.try_into().unwrap(),
+        None => {
+            eprintln!(
+                "Error: --identity must be exactly 20 hex characters (10 bytes), got '{}' ({} chars)",
+                s,
+                s.len()
+            );
+            std::process::exit(1);
+        }
     }
-    let mut out = [0u8; 10];
-    for i in 0..10 {
-        out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
-    }
-    out
 }
 
 /// Resolve the mix to use: either derived from a custom `--identity`, or the standard
@@ -353,13 +349,6 @@ struct SearchContext {
     /// Where padding goes for numeric candidate serials shorter than `SERIAL_LEN` bytes
     /// -- see `PadPosition`.
     pad: PadPosition,
-    /// Alphabet candidate serials are drawn from -- see `validate_alphabet`. `alphabet[0]`
-    /// doubles as the "zero"/pad-with symbol for `PadPosition::End`'s leading-run strip.
-    alphabet: Vec<u8>,
-    /// Cached `alphabet == b"0123456789"` -- lets the hot loop pick the fast
-    /// `write_serial`/`increment_bcd` path (identical to this tool's original behavior)
-    /// without re-comparing the alphabet on every iteration.
-    is_default_alphabet: bool,
     mix_lo: u32,
     mix_hi: u32,
     max_collisions: usize,
@@ -368,25 +357,21 @@ struct SearchContext {
     start: Instant,
 }
 
+/// Fixed candidate alphabet: digits then uppercase letters, base 36. Not user-configurable
+/// -- there is no `--alphabet` flag; every search always counts over this exact symbol set.
+const SEARCH_ALPHABET: &[u8; 36] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
 impl SearchContext {
     /// Encode an index without changing the counter's fixed-width representation.
     #[inline]
     fn write_candidate(&self, serial: &mut [u8; SERIAL_LEN], index: u64) {
-        if self.is_default_alphabet {
-            write_serial(serial, index);
-        } else {
-            write_candidate(serial, index as u128, &self.alphabet);
-        }
+        write_candidate(serial, index as u128, SEARCH_ALPHABET);
     }
 
     /// Advance the fixed-width counter, never a space-padded hashing buffer.
     #[inline]
     fn increment_candidate(&self, serial: &mut [u8; SERIAL_LEN]) {
-        if self.is_default_alphabet {
-            increment_bcd(serial);
-        } else {
-            increment_candidate(serial, &self.alphabet);
-        }
+        increment_candidate(serial, SEARCH_ALPHABET);
     }
 
     /// Produce all 20 serial bytes while preserving the model/sector suffix.
@@ -394,7 +379,7 @@ impl SearchContext {
     fn pad_candidate(&self, serial: &[u8; SERIAL_LEN]) -> [u8; SERIAL_LEN] {
         match self.pad {
             PadPosition::Start => *serial,
-            PadPosition::End => leading_pad_to_space_padded(serial, self.alphabet[0]),
+            PadPosition::End => leading_pad_to_space_padded(serial, SEARCH_ALPHABET[0]),
         }
     }
 }
@@ -425,7 +410,7 @@ fn resolve_model(
     match model {
         Some(model) => Ok(model),
         None if disk_size.is_some() => Ok(format!("ROS{size_label}")),
-        None => Err("--model is required when --disk-size is omitted (--bus scsi)"),
+        None => Err("--model is required when --size is omitted (--bus scsi)"),
     }
 }
 
@@ -438,29 +423,6 @@ fn compute_software_id(sid_lo: u32, sid_hi: u8, mix_lo: u32, mix_hi: u32) -> Str
     let final_lo = sid_lo ^ mix_lo;
     let final_hi = ((sid_hi as u32) | 0x100) ^ mix_hi;
     software_id::encode(((final_hi as u64) << 32) | (final_lo as u64))
-}
-
-/// Write a u64 as 20-byte ASCII decimal (zero-padded), avoiding format! heap allocation
-#[inline(always)]
-fn write_serial(buf: &mut [u8; SERIAL_LEN], mut n: u64) {
-    for i in (0..SERIAL_LEN).rev() {
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-}
-
-/// Increment the BCD buffer by 1 (only modifies the changed low digits)
-///
-/// Silently wraps to zero on all-9s overflow (requires 10^20 iterations, unreachable in practice).
-#[inline(always)]
-fn increment_bcd(buf: &mut [u8; SERIAL_LEN]) {
-    for i in (0..SERIAL_LEN).rev() {
-        if buf[i] < b'9' {
-            buf[i] += 1;
-            return;
-        }
-        buf[i] = b'0';
-    }
 }
 
 /// Strip a leading run of `pad_byte` (keeping at least one symbol), left-justify, and
@@ -480,9 +442,8 @@ fn leading_pad_to_space_padded(buf: &[u8; SERIAL_LEN], pad_byte: u8) -> [u8; SER
 }
 
 /// Write `n` as a `SERIAL_LEN`-byte string in the given `alphabet`'s base (`alphabet.len()`),
-/// right-justified, left-padded with `alphabet[0]` -- the arbitrary-base generalization of
-/// `write_serial` (which is exactly this function specialized to `alphabet = b"0123456789"`).
-/// `alphabet` must be non-empty (checked by the caller, `validate_alphabet`).
+/// right-justified, left-padded with `alphabet[0]`. `alphabet` must be non-empty (this
+/// project only ever calls it with the fixed `SEARCH_ALPHABET`).
 #[inline(always)]
 fn write_candidate(buf: &mut [u8; SERIAL_LEN], mut n: u128, alphabet: &[u8]) {
     let base = alphabet.len() as u128;
@@ -492,9 +453,9 @@ fn write_candidate(buf: &mut [u8; SERIAL_LEN], mut n: u128, alphabet: &[u8]) {
     }
 }
 
-/// Increment a candidate buffer by 1 in the given `alphabet`'s base -- the arbitrary-base
-/// generalization of `increment_bcd`. Silently wraps to all-`alphabet[0]` on overflow of the
-/// whole buffer; search stops before repeating a finite small-alphabet space.
+/// Increment a candidate buffer by 1 in the given `alphabet`'s base. Silently wraps to
+/// all-`alphabet[0]` on overflow of the whole buffer; search stops before repeating a
+/// finite small-alphabet space.
 #[inline(always)]
 fn increment_candidate(buf: &mut [u8; SERIAL_LEN], alphabet: &[u8]) {
     let base = alphabet.len();
@@ -509,40 +470,6 @@ fn increment_candidate(buf: &mut [u8; SERIAL_LEN], alphabet: &[u8]) {
         }
         buf[i] = alphabet[0];
     }
-}
-
-/// Validate and return a `search --alphabet` value as bytes, or exit with an error.
-///
-/// Requires: non-empty, at least 2 distinct symbols (a 1-symbol "alphabet" can't count),
-/// every symbol a distinct ASCII alphanumeric character (matching `is_valid_serial`'s
-/// charset, minus `-` which wouldn't make sense as a counting digit).
-fn validate_alphabet(alphabet: &str) -> Vec<u8> {
-    let bytes = alphabet.as_bytes().to_vec();
-    if bytes.len() < 2 {
-        eprintln!(
-            "Error: --alphabet must have at least 2 symbols (got {:?})",
-            alphabet
-        );
-        std::process::exit(1);
-    }
-    if !bytes.iter().all(|b| b.is_ascii_alphanumeric()) {
-        eprintln!(
-            "Error: --alphabet '{}' must contain only ASCII letters/digits",
-            alphabet
-        );
-        std::process::exit(1);
-    }
-    let mut sorted = bytes.clone();
-    sorted.sort_unstable();
-    sorted.dedup();
-    if sorted.len() != bytes.len() {
-        eprintln!(
-            "Error: --alphabet '{}' contains duplicate symbols",
-            alphabet
-        );
-        std::process::exit(1);
-    }
-    bytes
 }
 
 /// Valid Serial characters: `[0-9A-Za-z-]`
@@ -676,10 +603,8 @@ fn main() {
             bus,
             mbr_table,
             pad,
-            alphabet,
         } => cmd_search(
             disk_size, unit, threads, model, keys, count, from, identity, bus, mbr_table, pad,
-            alphabet,
         ),
         Commands::Sig2key { signature_hex } => cmd_sig2key(&signature_hex),
         Commands::Key2sig { key_file_or_text } => cmd_key2sig(&key_file_or_text),
@@ -718,7 +643,6 @@ fn cmd_search(
     bus: BusType,
     mbr_table_path: Option<String>,
     pad: PadPosition,
-    alphabet: String,
 ) {
     let (total_bytes, size_label) = resolve_disk_size(disk_size, unit, bus);
     let sector_val = sector_val_for_bus(bus, total_bytes);
@@ -731,19 +655,21 @@ fn cmd_search(
             .map(|n| n.get())
             .unwrap_or(4)
     });
-    let alphabet_bytes = validate_alphabet(&alphabet);
-    let is_default_alphabet = alphabet_bytes == b"0123456789";
-    let candidate_limit = candidate_space_limit(alphabet_bytes.len());
+    let candidate_limit = candidate_space_limit(SEARCH_ALPHABET.len());
     let start_serial = resolve_start_serial(from, candidate_limit).unwrap_or_else(|error| {
         eprintln!("Error: {error}");
         std::process::exit(1);
     });
-    // One process-wide selection, shared by fixed/sweep and every alphabet/padding mode.
+    // One process-wide selection, shared by fixed/sweep and every padding mode.
     let engine = HashEngine::auto_for_threads(num_threads).unwrap_or_else(|error| {
         eprintln!("FATAL: {error}");
         std::process::exit(1);
     });
-    println!("Alphabet: '{}' (base {})", alphabet, alphabet_bytes.len());
+    println!(
+        "Alphabet: '{}' (base {}, fixed)",
+        std::str::from_utf8(SEARCH_ALPHABET).unwrap(),
+        SEARCH_ALPHABET.len()
+    );
     if let Some(limit) = candidate_limit {
         println!("Candidate space: {limit} serials; stops at exhaustion (no repeats)");
     } else {
@@ -780,8 +706,6 @@ fn cmd_search(
             raw_targets: Some(Arc::new(raw_targets)),
             mbr_table: Some(Arc::new(table)),
             pad,
-            alphabet: alphabet_bytes,
-            is_default_alphabet,
             mix_lo: 0,
             mix_hi: 0,
             max_collisions: count,
@@ -814,8 +738,6 @@ fn cmd_search(
             raw_targets: None,
             mbr_table: None,
             pad,
-            alphabet: alphabet_bytes,
-            is_default_alphabet,
             mix_lo,
             mix_hi,
             max_collisions: count,
@@ -1020,7 +942,7 @@ fn search_batch(
     let batch = hashes.len() as u64;
     let step = (num_threads as u64) * batch;
     let offset = (tid as u64) * batch;
-    let limit = candidate_space_limit(ctx.alphabet.len());
+    let limit = candidate_space_limit(SEARCH_ALPHABET.len());
     let mut base = if let Some(limit) = limit {
         match start_serial.checked_add(offset) {
             Some(base) if base < limit => base,
@@ -1029,7 +951,7 @@ fn search_batch(
     } else {
         start_serial.wrapping_add(offset)
     };
-    let mut base_serial = [ctx.alphabet[0]; SERIAL_LEN];
+    let mut base_serial = [SEARCH_ALPHABET[0]; SERIAL_LEN];
     ctx.write_candidate(&mut base_serial, base);
     let sweep_mode = ctx.raw_targets.is_some();
     // Full-width target comparison: values outside 256..512 cannot match.
@@ -1054,7 +976,7 @@ fn search_batch(
             *hashes.serial_mut(lane) = ctx.pad_candidate(&lane_serial);
             if lane + 1 < active {
                 if base.wrapping_add(lane as u64) == u64::MAX {
-                    lane_serial.fill(ctx.alphabet[0]);
+                    lane_serial.fill(SEARCH_ALPHABET[0]);
                 } else {
                     ctx.increment_candidate(&mut lane_serial);
                 }
@@ -1102,7 +1024,7 @@ fn verify_search_hit(
     expected_sid: &str,
     ctx: &SearchContext,
 ) -> Result<([u8; SERIAL_LEN], String), &'static str> {
-    let mut serial = [ctx.alphabet[0]; SERIAL_LEN];
+    let mut serial = [SEARCH_ALPHABET[0]; SERIAL_LEN];
     ctx.write_candidate(&mut serial, index);
     let serial = ctx.pad_candidate(&serial);
     let actual = sha256::hash_40(&build_input_buf(&serial, &ctx.model_bytes, &ctx.sv_bytes));
@@ -1640,59 +1562,18 @@ mod tests {
         assert_eq!(bytes_via_k, bytes_via_m);
     }
 
-    // ---- write_serial ----
-
-    #[test]
-    fn test_write_serial_zero() {
-        let mut buf = [0u8; SERIAL_LEN];
-        write_serial(&mut buf, 0);
-        assert_eq!(&buf, b"00000000000000000000");
-    }
-
-    #[test]
-    fn test_write_serial_one() {
-        let mut buf = [0u8; SERIAL_LEN];
-        write_serial(&mut buf, 1);
-        assert_eq!(&buf, b"00000000000000000001");
-    }
-
-    #[test]
-    fn test_write_serial_known_6g() {
-        let mut buf = [0u8; SERIAL_LEN];
-        write_serial(&mut buf, 401012206606);
-        assert_eq!(&buf, b"00000000401012206606");
-    }
-
-    #[test]
-    fn test_write_serial_large() {
-        let mut buf = [0u8; SERIAL_LEN];
-        write_serial(&mut buf, 6145996160994);
-        assert_eq!(&buf, b"00000006145996160994");
-    }
-
-    #[test]
-    fn test_write_serial_max_u64() {
-        let mut buf = [0u8; SERIAL_LEN];
-        write_serial(&mut buf, u64::MAX);
-        assert_eq!(&buf, b"18446744073709551615");
-    }
-
-    // ---- leading_pad_to_space_padded (b'0') -- formerly the standalone
-    // `zero_padded_to_space_padded`, removed as a distinct function during the backend
-    // refactor since it was exactly `leading_pad_to_space_padded(buf, b'0')`. ----
+    // ---- leading_pad_to_space_padded (b'0') ----
 
     #[test]
     fn test_zero_padded_to_space_padded_zero() {
-        let mut buf = [0u8; SERIAL_LEN];
-        write_serial(&mut buf, 0);
+        let buf = *b"00000000000000000000";
         let out = leading_pad_to_space_padded(&buf, b'0');
         assert_eq!(&out, b"0                   ");
     }
 
     #[test]
     fn test_zero_padded_to_space_padded_short() {
-        let mut buf = [0u8; SERIAL_LEN];
-        write_serial(&mut buf, 123);
+        let buf = *b"00000000000000000123";
         let out = leading_pad_to_space_padded(&buf, b'0');
         assert_eq!(&out, b"123                 ");
     }
@@ -1703,8 +1584,7 @@ mod tests {
         // disk was observed to NOT be zero-padded by the controller (a short zero-padded
         // vs. unpadded serial produced different SOFTWARE IDs when boot-tested on a real
         // VM this session) -- confirming what the space-padded form should look like.
-        let mut buf = [0u8; SERIAL_LEN];
-        write_serial(&mut buf, 25828501);
+        let buf = *b"00000000000025828501";
         let out = leading_pad_to_space_padded(&buf, b'0');
         assert_eq!(&out, b"25828501            ");
     }
@@ -1712,8 +1592,7 @@ mod tests {
     #[test]
     fn test_zero_padded_to_space_padded_full_length_no_zeros_stripped() {
         // A 20-digit value with no leading zeros: nothing to strip, output == input.
-        let mut buf = [0u8; SERIAL_LEN];
-        write_serial(&mut buf, u64::MAX); // "18446744073709551615", 20 digits, leads with '1'
+        let buf = *b"18446744073709551615"; // u64::MAX, 20 digits, leads with '1'
         let out = leading_pad_to_space_padded(&buf, b'0');
         assert_eq!(&out, &buf);
     }
@@ -1727,67 +1606,10 @@ mod tests {
         assert_eq!(&out, b"10203               ");
     }
 
-    // ---- increment_bcd ----
-
-    #[test]
-    fn test_increment_bcd_simple() {
-        let mut buf = *b"00000000000000000000";
-        increment_bcd(&mut buf);
-        assert_eq!(&buf, b"00000000000000000001");
-    }
-
-    #[test]
-    fn test_increment_bcd_carry() {
-        let mut buf = *b"00000000000000000009";
-        increment_bcd(&mut buf);
-        assert_eq!(&buf, b"00000000000000000010");
-    }
-
-    #[test]
-    fn test_increment_bcd_multi_carry() {
-        let mut buf = *b"00000000000000000099";
-        increment_bcd(&mut buf);
-        assert_eq!(&buf, b"00000000000000000100");
-    }
-
-    #[test]
-    fn test_increment_bcd_all_nines() {
-        let mut buf = *b"00000000000000009999";
-        increment_bcd(&mut buf);
-        assert_eq!(&buf, b"00000000000000010000");
-    }
-
-    #[test]
-    fn test_increment_bcd_consistency_with_write_serial() {
-        let base: u64 = 999_999_999_990;
-        let mut bcd_buf = [0u8; SERIAL_LEN];
-        write_serial(&mut bcd_buf, base);
-
-        for i in 1..=16u64 {
-            increment_bcd(&mut bcd_buf);
-            let mut expected = [0u8; SERIAL_LEN];
-            write_serial(&mut expected, base + i);
-            assert_eq!(bcd_buf, expected, "BCD mismatch at base+{}", i);
-        }
-    }
-
-    // ---- write_candidate / increment_candidate (arbitrary-alphabet `--alphabet`) ----
-
-    #[test]
-    fn test_write_candidate_matches_write_serial_on_default_alphabet() {
-        // write_candidate/increment_candidate must be exact drop-in replacements for
-        // write_serial/increment_bcd when given the default digit alphabet -- this is what
-        // makes the default `--alphabet "0123456789"` path behaviorally identical to the
-        // tool's original (pre-`--alphabet`) behavior.
-        let digits = b"0123456789";
-        for n in [0u128, 1, 9, 10, 99, 100, 999_999_999_990] {
-            let mut a = [0u8; SERIAL_LEN];
-            write_candidate(&mut a, n, digits);
-            let mut b = [0u8; SERIAL_LEN];
-            write_serial(&mut b, n as u64);
-            assert_eq!(a, b, "mismatch at n={}", n);
-        }
-    }
+    // ---- write_candidate / increment_candidate (base-36 candidate generation) ----
+    //
+    // There is no `--alphabet` flag and no base-10 fast path -- SEARCH_ALPHABET (digits then
+    // uppercase letters, base 36) is the only candidate space `search` ever counts over.
 
     #[test]
     fn test_write_candidate_base36() {
@@ -1841,19 +1663,6 @@ mod tests {
         assert_eq!(out, leading_pad_to_space_padded(&buf, b'0'));
     }
 
-    // ---- validate_alphabet ----
-
-    #[test]
-    fn test_validate_alphabet_default_ok() {
-        assert_eq!(validate_alphabet("0123456789"), b"0123456789".to_vec());
-    }
-
-    #[test]
-    fn test_validate_alphabet_base36_ok() {
-        let alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-        assert_eq!(validate_alphabet(alphabet), alphabet.as_bytes().to_vec());
-    }
-
     // ---- candidate_space_limit / resolve_start_serial / resolve_model ----
     //
     // New in the backend refactor (no pre-refactor equivalent to port): the old scalar/SIMD
@@ -1861,11 +1670,10 @@ mod tests {
     // exact candidate-space boundary for small alphabets instead of wrapping mid-space.
 
     #[test]
-    fn test_candidate_space_limit_default_alphabet_overflows_u64() {
-        // 10^20 doesn't fit in u64 (u64::MAX ~= 1.8e19), so the default digit alphabet's
-        // space limit must be None (checked_pow overflow), preserving the original
-        // wrap-to-zero-after-u64::MAX behavior for the default 20-digit decimal counter.
-        assert_eq!(candidate_space_limit(10), None);
+    fn test_candidate_space_limit_base36_alphabet_overflows_u64() {
+        // 36^20 doesn't fit in u64 (u64::MAX ~= 1.8e19), so SEARCH_ALPHABET's space limit
+        // must be None (checked_pow overflow), preserving wrap-to-zero-after-u64::MAX.
+        assert_eq!(candidate_space_limit(36), None);
     }
 
     #[test]
@@ -1943,12 +1751,12 @@ mod tests {
 
         // Generate N_CANDIDATES consecutive serials (BCD increment, same as the real
         // search loop) and their (sid_lo, sid_hi) hashes.
-        let mut serial_buf = [b'0'; SERIAL_LEN];
+        let mut serial_buf = [SEARCH_ALPHABET[0]; SERIAL_LEN];
         let mut candidates: Vec<(u32, u8)> = Vec::with_capacity(N_CANDIDATES);
         for _ in 0..N_CANDIDATES {
             let buf = build_input_buf(&serial_buf, &model_bytes, &sv_bytes);
             candidates.push(sha256::hash_40(&buf));
-            increment_bcd(&mut serial_buf);
+            increment_candidate(&mut serial_buf, SEARCH_ALPHABET);
         }
 
         // Plant the needle: the target is whatever SOFTWARE ID candidate NEEDLE_IDX
@@ -2304,8 +2112,6 @@ mod tests {
             raw_targets: None,
             mbr_table: None,
             pad: PadPosition::Start,
-            alphabet: b"0123456789".to_vec(),
-            is_default_alphabet: true,
             mix_lo,
             mix_hi,
             max_collisions: 0,
@@ -2316,11 +2122,11 @@ mod tests {
     }
 
     /// Hash the serial `check_match`'s `verify_search_hit` would independently reconstruct
-    /// for `make_test_ctx`'s default context (default alphabet, `PadPosition::Start`,
-    /// space-padded all-blank model, zero sector value).
+    /// for `make_test_ctx`'s default context (`PadPosition::Start`, space-padded all-blank
+    /// model, zero sector value).
     fn hash_for_ctx_serial(serial_num: u64) -> (u32, u8) {
         let mut serial = [0u8; SERIAL_LEN];
-        write_serial(&mut serial, serial_num);
+        write_candidate(&mut serial, serial_num as u128, SEARCH_ALPHABET);
         let buf = build_input_buf(&serial, &[SPACE_PADDING; MODEL_LEN], &[0u8; 4]);
         sha256::hash_40(&buf)
     }
@@ -2387,7 +2193,7 @@ mod tests {
         // Plant a target at serial=7 using SPACE padding ("7" + 19 spaces), not the
         // default zero padding.
         let mut zero_buf = [b'0'; SERIAL_LEN];
-        write_serial(&mut zero_buf, 7);
+        write_candidate(&mut zero_buf, 7, SEARCH_ALPHABET);
         let space_buf = leading_pad_to_space_padded(&zero_buf, b'0');
         let buf = build_input_buf(&space_buf, &model_bytes, &sv_bytes);
         let (sid_lo, sid_hi) = sha256::hash_40(&buf);
@@ -2426,25 +2232,23 @@ mod tests {
     /// `test_search_simd_finds_target_with_custom_alphabet`: those two engine-specific tests
     /// merged into one loop over every backend `HashEngine::supported()` returns on this
     /// host, since `search_scalar`/`search_simd` are now the single generic `search_batch`.
-    /// This actually broadens coverage vs. the original (which only ever exercised scalar
-    /// and, conditionally, AVX-512): whichever of scalar/sha-ni/avx2/avx512/arm-sha2/neon
-    /// the running CPU supports all get exercised here.
+    /// There is no more `--alphabet` flag or base-10 default to compare against -- base 36
+    /// (`SEARCH_ALPHABET`) is the only candidate space `search` ever counts over, and this
+    /// confirms it produces letter-bearing candidates correctly across every backend
+    /// `HashEngine::supported()` returns on this host.
     #[test]
-    fn test_search_batch_finds_target_with_custom_alphabet_all_engines() {
-        let alphabet = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_vec();
+    fn test_search_batch_finds_target_with_letters_all_engines() {
         let model_bytes = [SPACE_PADDING; MODEL_LEN];
         let sv_bytes = [0u8; 4];
 
         // Candidate index 46, in base-36, is 1*36 + 10 -> the last two symbols are
-        // alphabet[1]='1' and alphabet[10]='A', i.e. "...001A" -- genuinely requires a
-        // letter and is unambiguously different from write_serial(46)'s base-10 "...0046".
+        // alphabet[1]='1' and alphabet[10]='A', i.e. "...001A" -- genuinely requires a letter.
         let idx: u128 = 46;
         let mut target_buf = [0u8; SERIAL_LEN];
-        write_candidate(&mut target_buf, idx, &alphabet);
+        write_candidate(&mut target_buf, idx, SEARCH_ALPHABET);
         assert!(
-            target_buf.contains(&b'A') || !target_buf.iter().all(|b| b.is_ascii_digit()),
-            "sanity: base-36 index {} should not be pure-decimal-equivalent to base-10 {}",
-            idx,
+            target_buf.contains(&b'A'),
+            "sanity: base-36 index {} should contain a letter",
             idx
         );
 
@@ -2464,8 +2268,6 @@ mod tests {
 
         for engine in HashEngine::supported() {
             let mut ctx = make_test_ctx(vec![make_target()]);
-            ctx.alphabet = alphabet.clone();
-            ctx.is_default_alphabet = false;
             ctx.pad = PadPosition::Start;
             ctx.max_collisions = 1;
             ctx.model_bytes = model_bytes;
@@ -2479,14 +2281,6 @@ mod tests {
             );
             assert!(ctx.stop.load(Ordering::Relaxed));
         }
-
-        // Confirm the default (base-10) path does NOT produce this same hash at the same
-        // loop index -- proving the two candidate-generation paths genuinely diverge.
-        let mut default_buf = [b'0'; SERIAL_LEN];
-        write_serial(&mut default_buf, idx as u64);
-        let default_input_buf = build_input_buf(&default_buf, &model_bytes, &sv_bytes);
-        let (default_sid_lo, default_sid_hi) = sha256::hash_40(&default_input_buf);
-        assert!(default_sid_lo != need_lo || ((default_sid_hi as u32) | 0x100) != need_hi);
     }
 
     #[test]

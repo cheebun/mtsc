@@ -88,7 +88,7 @@ a useful cross-check that this reverse-search math is implemented correctly.
 hash.
 
 `Pair` = first-half digit + second-half digit. `Marker` verified directly against this
-project's own `ros-serialgen check --identity <hex>` output for all 256 identities
+project's own `mtsc check --identity <hex>` output for all 256 identities
 (2026-09-07):
 
 | Pair | Identity (20 hex chars) | Marker (LE) | `mbr_val` |
@@ -362,7 +362,7 @@ Using the already-verified real device data for `HHJH-UFWL` (`serial=SZHYPO14090
    (close to the 32 expected on average -- `65536/2048`).
 3. Picked 6 of the 27 (`0000000000000000040c`, `000000000000000006c6`,
    `00000000000000002202`, `00000000000000002f48`, `000000000000000031bb`,
-   `0000000000000000ee69`) and ran each through the real `ros-serialgen check` binary
+   `0000000000000000ee69`) and ran each through the real `mtsc check` binary
    with the same serial/model/size. **All 6 reproduced `HHJH-UFWL` exactly**
    (`✅ Matched signature: HHJH-UFWL`) -- live confirmation with this project's actual
    tooling, not just the Python prototype, that any identity sharing the target
@@ -404,7 +404,7 @@ brute-force job.
 
 Ran the feasibility check (§"Why this is cheap") directly against `NU4C-KK1L`
 (`serial=075583791106`, `model="TOPSSD DiskOnModule"`, `size=255328256` bytes), using
-real `sid_lo`/`sid_hi` values from `ros-serialgen check` (not reimplemented by hand) --
+real `sid_lo`/`sid_hi` values from `mtsc check` (not reimplemented by hand) --
 tried both bus assumptions:
 
 | Bus | `sid_lo` / `sid_hi` | `required_mix` | Divisible by `0x3FF800F`? | Feasible? |

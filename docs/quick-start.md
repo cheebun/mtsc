@@ -38,10 +38,10 @@ All entries above use space-free model names, so no `%20` encoding is needed.
 The table and fixed MBR header in this walkthrough use the older **20-digit zero-padded serial + all-zero identity** convention. For unlisted sizes, the following command preserves that convention (see [command-reference.md](reference/command-reference.md); sub-1GiB sizes use `--unit m/k/b`, minimum 64MiB):
 
 ```bash
-mtsc search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml --identity 00000000000000000000 --pad start
+mtsc search --size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml --identity 00000000000000000000 --pad start
 ```
 
-For the current defaults, omit `--identity` and `--pad`: search covers all 2048 `mbr_val` values per candidate and right-pads the natural serial with spaces. **Use the output serial, identity, and marker together**; replace Step 5's entire MBR hex with the matching result rather than reusing its all-zero/BDE8 header. Recheck with `mtsc check --serial <serial> --disk-size <N> --unit <g|m|k|b> --model <model> --identity <identity-from-search>`; `check` otherwise defaults to all-zero identity and shows both padding variants for short numeric serials.
+For the current defaults, omit `--identity` and `--pad`: search covers all 2048 `mbr_val` values per candidate and right-pads the natural serial with spaces. **Use the output serial, identity, and marker together**; replace Step 5's entire MBR hex with the matching result rather than reusing its all-zero/BDE8 header. Recheck with `mtsc check --serial <serial> --size <N> --unit <g|m|k|b> --model <model> --identity <identity-from-search>`; `check` otherwise defaults to all-zero identity and shows both padding variants for short numeric serials.
 
 ---
 
@@ -106,7 +106,7 @@ sleep 1
 
 echo -n "00000000000000000000BDE800000000F4E11772DEEAED8AF43668DA5EBDAD0846B694FFE9E77EFAE77E11A6049E4303B0B09DCEF8D9A647D643D1BAD4AF13B9659CCB11A06D3A9080096634E4E88B07" | xxd -r -p | dd of=/dev/nbd0 bs=1 seek=256 count=80 conv=notrunc
 
-hexdump -C --disk-size 0x100 -n 80 /dev/nbd0
+hexdump -C -s 0x100 -n 80 /dev/nbd0
 qemu-nbd --disconnect /dev/nbd0
 ```
 

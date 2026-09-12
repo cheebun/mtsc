@@ -9,31 +9,32 @@ For PVE/QEMU deployment commands (`qm`, `qemu-img`, `qemu-nbd`, `dd`, `lvcreate`
 ## `mtsc search`
 
 ```bash
-mtsc search --disk-size 100 --unit g --threads 16 --count 0 --keys keys.toml
-mtsc search --disk-size 128 --unit m --threads 16 --count 0 --keys keys.toml
+mtsc search --size 100 --unit g --threads 16 --count 0 --keys keys.toml
+mtsc search --size 128 --unit m --threads 16 --count 0 --keys keys.toml
 ```
 
 | Option | Meaning |
 |---|---|
-| `--disk-size <N>` | Disk size magnitude, paired with `--unit`. **Required for `ide`/`nvme`**; determines `sector_val` and must match the disk you'll create. Optional for `scsi`, whose `sector_val` is always `0`. |
-| `--unit <unit>` | Unit for `--disk-size`: `g` (GiB, default), `m` (MiB), `k` (KiB), or `b` (raw bytes). Case-insensitive. |
+| `--size <N>` | Disk size magnitude, paired with `--unit`. **Required for `ide`/`nvme`**; determines `sector_val` and must match the disk you'll create. Optional for `scsi`, whose `sector_val` is always `0`. |
+| `--unit <unit>` | Unit for `--size`: `g` (GiB, default), `m` (MiB), `k` (KiB), or `b` (raw bytes). Case-insensitive. |
 | `--threads <N>` | Number of search threads. Defaults to all available CPU cores if omitted. |
-| `--model <name>` | Disk model string, truncated or space-padded to 16 bytes for hashing. Defaults to `ROS<N><unit>` (e.g. `ROS100G`, `ROS128M`) when a size is supplied. **Required when `--bus scsi` is used without `--disk-size`.** |
+| `--model <name>` | Disk model string, truncated or space-padded to 16 bytes for hashing. Defaults to `ROS<N><unit>` (e.g. `ROS100G`, `ROS128M`) when a size is supplied. **Required when `--bus scsi` is used without `--size`.** |
 | `--keys <path>` | Path to `keys.toml`. Defaults to `./keys.toml` if omitted; missing or empty target configuration is an error. |
 | `--count <N>` | Number of collisions to find before stopping. `1` (default) stops at the first hit; `0` imposes no hit-count limit (Ctrl+C stops the search). |
-| `--from <N>` | Start at candidate index `N × 1,000,000`, matching the `M` progress unit. Default `0`. Indices use `u64`; this is not a promise to enumerate every string in `alphabet_len^20`. Keep model, size, bus, alphabet order, padding, identity mode, and targets unchanged when resuming. |
+| `--from <N>` | Start at candidate index `N × 1,000,000`, matching the `M` progress unit. Default `0`. Indices use `u64`; this is not a promise to enumerate every string in the 36^20 candidate space. Keep model, size, bus, padding, identity mode, and targets unchanged when resuming. |
 | `--identity <hex>` | Fix the 10-byte MBR identity seed (`0x100-0x109`), supplied as exactly 20 hex characters. **If omitted, search covers all 2048 `mbr_val` values for each candidate**, not just the all-zero identity. |
 | `--mbr-table <path>` | Identity/marker lookup table for sweep mode only (no `--identity`). Defaults to `./mbr-table.toml` if present, otherwise the embedded complete table. Valid partial entries override the embedded table; missing entries retain their embedded defaults. Invalid entries are rejected with warnings and leave the defaults intact, including identities/markers that do not reproduce their declared `mbr_val` and marker. |
-| `--pad <start\|end>` | Default `end`: use the candidate's natural symbol length and **right-pad with spaces** to 20 bytes (`123` becomes `123` plus 17 spaces). `start` left-pads to 20 bytes with `alphabet[0]` (`0` for the default alphabet). |
-| `--alphabet <symbols>` | Ordered candidate alphabet; default `0123456789`. Must contain at least two distinct, non-repeated ASCII letters/digits. Order defines base-N counting and the first symbol is the zero/left-padding symbol. For example, `0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ` selects base 36. |
+| `--pad <start\|end>` | Default `end`: use the candidate's natural symbol length and **right-pad with spaces** to 20 bytes (`123` becomes `123` plus 17 spaces). `start` left-pads to 20 bytes with `0`. |
 | `--bus <ide\|scsi\|nvme>` | `ide` (default) covers `ide0` and `sata0`/AHCI. `nvme` uses the same size-dependent sector rounding as `ide`. `scsi` covers `scsi0`/`virtio-scsi-pci`, **not `sata0`**, and forces `sector_val=0`. SCSI activation is confirmed on x86_64; ARM64 virtualization-detection caveats remain in [license-internals.md §8](../investigation/license-internals.md#8-arm32-keyman-on-virtio-scsi-a-platform-specific-investigation). |
+
+The candidate alphabet is fixed at base 36 (digits then uppercase letters, `0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ`) — there is no `--alphabet` flag.
 
 ### Compatibility with older collision tables
 
 Existing zero-padded serial/all-zero-identity tables use the old search convention. Reproduce it explicitly:
 
 ```bash
-mtsc search --disk-size 100 --unit g --threads 16 --count 0 --keys keys.toml --identity 00000000000000000000 --pad start
+mtsc search --size 100 --unit g --threads 16 --count 0 --keys keys.toml --identity 00000000000000000000 --pad start
 
 # SCSI needs a model, but not a disk size
 mtsc search --bus scsi --model RouterOS-SCSI --threads 16 --keys keys.toml
@@ -41,37 +42,37 @@ mtsc search --bus scsi --model RouterOS-SCSI --threads 16 --keys keys.toml
 
 Default sweep results include `identity` and `marker`. **Deploy those exact values with the printed serial**, rather than copying the old `00000000000000000000BDE800000000` MBR header. When checking a hit, pass its identity explicitly; `check` does not inherit `search`'s sweep default. Keep a full 20-byte zero-padded serial intact when reproducing an older table entry.
 
-If `alphabet_len^20` fits in `u64`, search stops and reports exhaustion instead of repeating candidates. Otherwise, the `u64` candidate index wraps to zero after `u64::MAX`. An overflowing `--from` offset or one beyond a finite candidate space is rejected.
+36^20 doesn't fit in `u64`, so the `u64` candidate index wraps to zero after `u64::MAX` rather than reporting exhaustion. An overflowing `--from` offset is rejected.
 
-Candidate generation supports every CPU backend: scalar, SHA-NI, AVX2, AVX-512, ARM SHA2, and NEON as supported by the CPU/OS. Startup calibration selects the backend once for the requested thread count; backend-owned batches are retained for both padding modes and custom alphabets. This does not guarantee identical end-to-end throughput for different alphabets or sweep/fixed-identity modes. See [SHA-256 backends](sha256-backends.md).
+Candidate generation supports every CPU backend: scalar, SHA-NI, AVX2, AVX-512, ARM SHA2, and NEON as supported by the CPU/OS. Startup calibration selects the backend once for the requested thread count; backend-owned batches are retained for both padding modes. This does not guarantee identical end-to-end throughput across sweep/fixed-identity modes. See [SHA-256 backends](sha256-backends.md).
 
 ### Minimum disk size per unit
 
 Sizes use powers of 1024. Each unit has a separate integer minimum, enforcing at least 64 MiB at startup (the process exits with an error if violated). This also applies to a size explicitly supplied for `scsi`, even though its hash ignores size:
 
-| Unit | Minimum `--disk-size` value |
+| Unit | Minimum `--size` value |
 |---|---|
 | `g` | `1` (1 GiB; integer magnitudes cannot express 64 MiB) |
 | `m` | `64` (64 MiB) |
 | `k` | `65536` (64 MiB in KiB) |
 | `b` | `67108864` (64 MiB in bytes) |
 
-Decimal sizes are not supported (`--disk-size` is an integer) -- fractional GiB values must be expressed in a smaller unit instead, e.g. `--disk-size 1536 --unit m` for 1.5 GiB. This avoids floating-point rounding errors in the byte-exact `sector_val` calculation.
+Decimal sizes are not supported (`--size` is an integer) -- fractional GiB values must be expressed in a smaller unit instead, e.g. `--size 1536 --unit m` for 1.5 GiB. This avoids floating-point rounding errors in the byte-exact `sector_val` calculation.
 
 Progress uses millions of candidate hashes, with a nominal interval of 10,000M (10 billion), e.g. `10000M hashes, 5s, 0 found`. Sweeping 2048 `mbr_val` values reuses each candidate's hash; it does not multiply the `--from` index by 2048. Wall-clock intervals vary by backend and workload; the [historical backend measurements](../benchmarks/README.md) are not full search throughput.
 
 ## `mtsc check`
 
 ```bash
-mtsc check --serial 00000000090681934458 --disk-size 24 --unit g --model cheerlon
+mtsc check --serial 00000000090681934458 --size 24 --unit g --model cheerlon
 ```
 
 | Option | Meaning |
 |---|---|
 | `--serial <value>` | Serial to verify. **Required.** For a pure-digit serial shorter than 20 bytes, computes both left-zero-padding and right-space-padding and labels the results. Alphanumeric serials are right-space-padded. If both forms yield identical 20-byte input, only one result is printed; an already-20-byte serial is unchanged. |
-| `--disk-size <N>` | Required for `ide`/`nvme`; optional for `scsi`, whose `sector_val` is always `0`. |
+| `--size <N>` | Required for `ide`/`nvme`; optional for `scsi`, whose `sector_val` is always `0`. |
 | `--unit <unit>` | `g` (GiB, default), `m` (MiB), `k` (KiB), or `b` (bytes); same supplied-size minimums as `search`. |
-| `--model <name>` | Defaults to `ROS<N><unit>` when size is supplied. Required for `--bus scsi` without `--disk-size`. |
+| `--model <name>` | Defaults to `ROS<N><unit>` when size is supplied. Required for `--bus scsi` without `--size`. |
 | `--keys <path>` | Path to `keys.toml`; defaults to `./keys.toml`. |
 | `--identity <hex>` | Exactly 20 hex characters for the 10-byte MBR identity seed. **Default remains all zeros**, unlike `search`; no sweep is performed. Pass a search result's identity explicitly. |
 | `--bus <ide\|scsi\|nvme>` | Same meanings and platform caveats as `search`; default `ide`. |
@@ -81,7 +82,7 @@ Prints the computed SOFTWARE ID for each distinct padding variant. A configured 
 
 ```bash
 # Recheck a sweep result with its identity (supply the serial exactly as printed)
-mtsc check --serial <serial> --disk-size 100 --unit g --model ROS100G --identity <identity-from-search> --license license.key
+mtsc check --serial <serial> --size 100 --unit g --model ROS100G --identity <identity-from-search> --license license.key
 
 # No size needed for SCSI, but the model is mandatory
 mtsc check --serial 123 --bus scsi --model RouterOS-SCSI

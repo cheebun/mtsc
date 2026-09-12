@@ -80,7 +80,7 @@ fsync(fd); close(fd)
 | `0x10A` | 2 字节 | marker（样本：`4F 09`） |
 | 其余 | — | `\0` |
 
-**结论**：`keygen_x86` 会为每台"无实体 flash"的机器生成一个随机 **10 字节身份种子**（写入 MBR 偏移 `0x100`），并附带由该身份推导出的 **2 字节 marker**（偏移 `0x10A`）。这与本项目 `ros-serialgen` 中 `--identity` 参数模拟的机制完全同构。
+**结论**：`keygen_x86` 会为每台"无实体 flash"的机器生成一个随机 **10 字节身份种子**（写入 MBR 偏移 `0x100`），并附带由该身份推导出的 **2 字节 marker**（偏移 `0x10A`）。这与本项目 `mtsc` 中 `--identity` 参数模拟的机制完全同构。
 
 > 偏移 `0x100`/`0x10A` 与本项目 `src/targets.rs::marker_from_identity()` 文档注释中的标注一致，且 marker 值经实测与 `marker_from_identity()` 计算结果逐字节吻合 —— 见 `02-cross-validation.md`。
 
@@ -148,7 +148,7 @@ execve("/nova/bin/keyman", ["/nova/bin/keyman", "--software-id"]) = -1 ENOENT
 
 **本次运行最关键的事实**：从 `execve(/nova/bin/keyman)` 到打印出完整 License Key 文本块，`strace -e trace=network` 追踪到 **零次网络调用**。这说明 `keygen_x86` 二进制内 **内置了足以在本地完成 EC-KCDSA 签名运算的密钥材料**，签发 License 不需要询问任何服务器。
 
-用本项目 `ros-serialgen key2sig` 对该 License 解码/验证（真实 MikroTik 公钥）：
+用本项目 `mtsc key2sig` 对该 License 解码/验证（真实 MikroTik 公钥）：
 
 ```
 Software ID: 2FJ5-TZ4V        # 与喂给 fake keyman 的 "TI09-7WK3" 不一致
@@ -160,7 +160,7 @@ License valid: false
 **解读**（尚未完全定论，见下文）：
 
 1. `keygen` 把 `keyman --software-id` 的**整行原始输出**当作文本原样打印（未做字段解析）。
-2. 真正被签进 License 的 `Software ID`（`2FJ5-TZ4V`）是它**自行另行计算**的——很可能内部还有一套与本项目 `ros-serialgen` 相近的"读磁盘参数 → 算 SOFTWARE ID"逻辑，而不是信任 `keyman` 打印的文本。本观测所用 `fake_rootdisk` 为全零普通文件（非真实块设备、无真实 Model/Serial/容量），故其算出的 ID 无真实含义，License 自然验证不过。
+2. 真正被签进 License 的 `Software ID`（`2FJ5-TZ4V`）是它**自行另行计算**的——很可能内部还有一套与本项目 `mtsc` 相近的"读磁盘参数 → 算 SOFTWARE ID"逻辑，而不是信任 `keyman` 打印的文本。本观测所用 `fake_rootdisk` 为全零普通文件（非真实块设备、无真实 Model/Serial/容量），故其算出的 ID 无真实含义，License 自然验证不过。
 3. `License valid: false` 表明这份 License **未通过真实 MikroTik 公钥验证**。这既可能因为输入数据是伪造的，也可能因为内置密钥是**该补丁项目自签的密钥**（只对已 patch 固件有效），本报告未对此下定论。
 
 ---

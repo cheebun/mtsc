@@ -11,7 +11,7 @@ Collision results for model `"QEMU NVMe Ctrl"`. Standard identity (`000000000000
 The command below explicitly preserves the table's zero-padded/all-zero-identity convention. `--bus nvme` uses the same rounding as the former `--bus ide` command. Default searches without `--identity`/`--pad` produce sweep results whose own identity/marker and serial padding must be preserved.
 
 ```
-mtsc search --bus nvme --disk-size 1 --unit g --threads 4 --count 0 --model 'QEMU NVMe Ctrl' --identity 00000000000000000000 --pad start
+mtsc search --bus nvme --size 1 --unit g --threads 4 --count 0 --model 'QEMU NVMe Ctrl' --identity 00000000000000000000 --pad start
 ```
 
 | Software ID | Serial |

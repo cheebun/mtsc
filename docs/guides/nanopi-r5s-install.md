@@ -50,7 +50,7 @@ qm create 304 \
 | `--efidisk0 local:0` | EFI 变量盘，`0` 表示使用默认容量（64MB） |
 | `--args` | 通过 QEMU 参数设置目标磁盘的 model 和 serial。**必须在创建时指定**，否则安装后 SOFTWARE ID 会是不可预期的默认值。`device.scsi0` 对应目标磁盘的 SCSI ID |
 
-> 本例为 `scsi0`/`virtio-scsi-pci`，`sector_val` 固定为 `0`，磁盘容量不参与 SOFTWARE ID。使用 `mtsc check --bus scsi --model RouterOS-SCSI --serial 653876263836` 可不传 `--disk-size`，但必须显式指定 `--model`。短数字 serial 会分别输出左补零和右补空格的结果，应核对与虚拟机实际匹配的一项。`ide`/`nvme` 则必须提供容量，并使用相同的 sector rounding。使用 qcow2 还是 raw 格式不影响虚拟机内部看到的磁盘大小。
+> 本例为 `scsi0`/`virtio-scsi-pci`，`sector_val` 固定为 `0`，磁盘容量不参与 SOFTWARE ID。使用 `mtsc check --bus scsi --model RouterOS-SCSI --serial 653876263836` 可不传 `--size`，但必须显式指定 `--model`。短数字 serial 会分别输出左补零和右补空格的结果，应核对与虚拟机实际匹配的一项。`ide`/`nvme` 则必须提供容量，并使用相同的 sector rounding。使用 qcow2 还是 raw 格式不影响虚拟机内部看到的磁盘大小。
 
 ---
 

@@ -1,9 +1,18 @@
 # `mtsc` Rename & CLI Restructuring Plan
 
-**Status: planned, not yet implemented.** This document records the decision and open
-questions so implementation can pick this up without re-deriving the reasoning. See
-[command-reference.md](command-reference.md) for the *current*, already-implemented
-`ros-serialgen` CLI this plan will replace.
+**Status: partially implemented (as of 2026-09-13).** Originally "planned, not yet
+implemented" -- since then, the project rename (`ros-serialgen`->`mtsc`, package +
+GitHub repo) landed via separate work not sequenced through this plan, and this plan's
+own `--disk-size`->`--size` rename, all-short-flags-removed, and MTBase64/hex
+`data-encoding` migration items are now implemented and verified (see each section's
+own "Status" note below for specifics). Still NOT implemented: the `generate`
+subcommand restructuring (`search` is still `search`, not `generate serial`; the new
+mbr_val-full-space `--mbr-table` wiring described under it is also still pending),
+`sig2key`/`key2sig` -> unified `convert`, `verify` -> `selftest`, the `mikro_`->`mt_`
+prefix unification, the `main.rs` module split, `targets.rs`'s TOML-parser rewrite, and
+`CHANGELOG.md`. This document still records the decisions and open questions for
+whichever of those is picked up next -- see [command-reference.md](command-reference.md)
+for the actual current CLI.
 
 ## Rename
 
@@ -94,6 +103,12 @@ Net effect on the `generate` restructuring: `mtsc generate serial` is the *only*
 
 ## Flag rename: `--disk-size` -> `--size`
 
+**Status: ✅ Implemented 2026-09-13.** `--size` shipped on both `search` and `check`
+(the `generate serial` rename itself is still not implemented -- the subcommand is still
+called `search`, only its `--disk-size` flag was renamed). `disk_size: u64` was kept as
+the internal field name exactly as decided below. Verified: `cargo build/test/clippy/fmt`
+all clean, plus a real `mtsc check --size ...` invocation confirmed on the build host.
+
 Decided: `--disk-size` becomes `--size` on both `search`/`generate serial` and `check`.
 Internal Rust field name `disk_size: u64` stays as-is -- only the clap `long = "..."`
 string changes; it's not user-facing.
@@ -136,6 +151,16 @@ the logs no longer showing the literal flag name typed at the time. Applies unif
 alongside the living-docs update listed above; no file is left on the old flag name.
 
 ## Resolved: remove all short flags, long-form only
+
+**Status: ✅ Implemented 2026-09-13.** Every `short = ...`/bare `short` attribute was
+removed from `Search`/`Check` (including the `bus`/`unit`/`threads`/`model`/`keys`/
+`count`/`from`/`identity`/`license` fields), and clap's own auto `-h`/`-V` were also
+disabled via `disable_help_flag`/`disable_version_flag` plus explicit long-only
+`--help`/`--version` fields with `global = true` (needed so `mtsc search --help` keeps
+working at the subcommand level too -- an early attempt without `global = true` broke
+subcommand `--help` entirely, caught by build-host verification before landing).
+Verified live: `mtsc --help`/`mtsc search --help`/`mtsc check --help` all show long-form
+only, `mtsc search -s` now fails with clap's "unexpected argument" error.
 
 Supersedes the `check`'s `--serial`-has-no-short-flag issue below (and preempts the same
 namespace pressure recurring for `generate`/`convert`'s own flag sets) -- **decided:
@@ -372,6 +397,18 @@ this list):
 
 ### Required before shipping: regression-test the `data_encoding` migration against real historical samples
 
+**Status: ✅ Done 2026-09-13.** Both parts implemented in `convert.rs`'s test module:
+(1) `test_new_base64_matches_legacy_on_real_signatures` (2 hardcoded real signatures) plus
+a new `#[ignore]`d `test_new_base64_matches_legacy_on_every_keys_toml_signature`, run
+explicitly against the build host's real `keys.toml` (**1038 signatures, zero
+mismatches**); (2) `test_base64_negative_corpus_documents_old_vs_new_behavior` covers
+misplaced padding, excess padding count, invalid characters, non-canonical trailing bits,
+and off-by-one lengths (63/65 bytes) -- for each, both decoders' actual accept/reject
+behavior is asserted explicitly, not just diffed. Confirmed tightenings (new decoder
+rejects what the old one silently accepted): misplaced/excess padding. The old
+`mt_base64_encode`/`mt_base64_decode` were deleted from production code only after these
+passed (kept as `legacy_mt_base64_encode`/`legacy_mt_base64_decode` test-only fixtures).
+
 Flagged independently by both an architecture and a security review, not yet done.
 Concern: the hand-written `mt_base64_decode` (`convert.rs`, being replaced per the
 earlier `data-encoding` decision) may be **more lenient** than `data_encoding`'s
@@ -558,6 +595,13 @@ here as an explicitly open gap, not an implied-complete one.
 
 ## Replace hand-rolled MTBase64 with the `data-encoding` crate
 
+**Status: ✅ Implemented 2026-09-13.** `data-encoding = "2"` (2.11.1 resolved) added to
+`Cargo.toml`; `MT_BASE64` is a `static ... LazyLock<Encoding>` in `convert.rs`, exactly as
+designed below (`Specification` + `BitOrder::LeastSignificantFirst`). `AGENTS.md`'s
+Dependencies section was updated per the "Follow-up correction needed" note below.
+Verification (compatibility diff + negative corpus) is recorded in the "Required before
+shipping" section above.
+
 **Decided:** replace `convert.rs`'s hand-written `mt_base64_encode`/`mt_base64_decode`
 with the `data-encoding` crate, rather than keeping (or further generalizing) the
 bespoke bit-shifting implementation.
@@ -631,6 +675,13 @@ sites) switch from `mt_base64_encode(&sig_bytes)` / `mt_base64_decode(&b64_data)
 `MT_BASE64.encode(&sig_bytes)` / `MT_BASE64.decode(b64_data.as_bytes())`.
 
 ### Bonus: `hex_encode`/`hex_decode` (`convert.rs`) -> `data_encoding::HEXLOWER`/`HEXUPPER`
+
+**Status: ✅ Implemented 2026-09-13**, with one deviation from this exact plan: `hex_encode`
+uses `HEXUPPER` (matches today's uppercase output exactly), but `hex_decode` uses
+`HEXLOWER_PERMISSIVE` rather than plain `HEXLOWER`/`HEXUPPER` -- needed because
+`signature_hex`/Key-text input is accepted in either case (matching `main.rs`'s existing
+`--identity` behavior; see the "Correctness detail" note in the Duplicate section below,
+which flagged this exact permissive-vs-strict distinction). No separate `hex` crate added.
 
 **Decided:** replace `convert.rs`'s hand-written `hex_encode`/`hex_decode` with
 `data_encoding`'s built-in `HEXLOWER`/`HEXUPPER` encodings, once `data-encoding` is
@@ -1115,6 +1166,13 @@ section below, added specifically to apply this consistently instead of piecemea
 
 ### Duplicate hex-decoding logic across three files -- consolidate onto `data_encoding`
 
+**Status: ✅ Implemented 2026-09-13.** All three call sites now go through
+`data_encoding` directly (`main.rs`'s `parse_identity_hex` calls `HEXLOWER_PERMISSIVE`
+inline rather than through a shared `convert::hex_decode`, since making `hex_decode`
+`pub(crate)` wasn't even necessary once both files can import the same crate-level
+constant independently; `targets.rs`'s test does the same). The
+`HEXLOWER_PERMISSIVE`-not-`HEXLOWER` correctness detail flagged below was applied.
+
 **Decided.** The same "hex-pair-to-byte" logic is independently hand-rolled in three
 places:
 
@@ -1297,8 +1355,13 @@ component.
       self-healing loader (create-if-missing from `include_str!`-embedded default,
       fill gaps from that default if incomplete), and update hit-output to print
       `software_id`/`identity`/`marker`/`serial` together.
-- [ ] Update all `ros-serialgen` references project-wide once the rename itself
-      proceeds. **This list is now the actual verified output of
+- [x] Update all `ros-serialgen` references project-wide -- **done 2026-09-13** for every
+      live doc/source file (the repo, package, and binary were already renamed to `mtsc`
+      by this point via separate earlier work, not through this plan's own sequencing).
+      Deliberately left untouched: `archive/docs2-superseded/*` (frozen historical
+      archive) and this plan doc's own narrative (self-referential, discusses the old name
+      as its subject matter). Original verified-list note below, for context:
+      **This list is now the actual verified output of
       `grep -rl "ros-serialgen" . --include="*.md" --include="*.rs" --include="*.toml"`
       (run September 2026), not an assumed subset** -- an earlier draft of this checklist
       item listed only 7 files, including two (`CLAUDE.md`,
@@ -1329,14 +1392,17 @@ component.
 - [ ] Decide exact display format for the echoed identity/marker/reserved in `convert`'s
       160-char MBR-dump case (three labeled fields vs. one combined hex blob -- not yet
       specified, see above).
-- [ ] Run the `data_encoding`-migration regression diff (old `mt_base64_decode` vs. new
-      decoder) against every real sample in `keys/` and `docs/database/*.md` -- required
-      before deleting the old decoder, not a nice-to-have.
+- [x] Run the `data_encoding`-migration regression diff (old `mt_base64_decode` vs. new
+      decoder) against every real sample -- **done 2026-09-13**, see the "Required before
+      shipping" section above (1038/1038 real `keys.toml` signatures agreed, plus a
+      negative/malformed-input corpus). The old decoder was deleted from production only
+      after this passed.
 - [x] `verify` -> `selftest` (decided, see above).
 - [x] `check` -> kept as-is, no rename (decided, see above -- previously this line
       still said "undecided" after the decision above had already been made; fixed).
 - [x] All short flags removed, long-form only (decided, see above -- reaffirmed after
-      review, still the conclusion).
+      review, still the conclusion). **Also code-complete 2026-09-13** -- see the
+      "Resolved: remove all short flags, long-form only" section's status note above.
 - [x] `software_id.rs`'s `round_sectors` scope mismatch -- decided: leave in place, no
       action required (see above).
 - [ ] `main.rs` module split -- scope drafted above, needs its own sub-task breakdown

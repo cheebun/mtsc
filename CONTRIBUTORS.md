@@ -4,7 +4,7 @@ Thanks to everyone who has helped grow this project's signature database and too
 
 | Contributor | Contribution |
 |---|---|
-| [MurVlad](https://github.com/MurVlad) | Provided two license keys in [issue #1](https://github.com/cheebun/ros-serialgen/issues/1), later verified and added to the collision database: `G353-EXPG` (L6) and `VI8Q-E90F` (L1) |
+| [MurVlad](https://github.com/MurVlad) | Provided two license keys in [issue #1](https://github.com/cheebun/mtsc/issues/1), later verified and added to the collision database: `G353-EXPG` (L6) and `VI8Q-E90F` (L1) |
 
 ---
 

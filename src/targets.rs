@@ -404,10 +404,11 @@ mod tests {
             ),
         ];
         for (identity_hex, expected_marker) in cases {
-            let mut identity = [0u8; 10];
-            for (i, byte) in identity.iter_mut().enumerate() {
-                *byte = u8::from_str_radix(&identity_hex[i * 2..i * 2 + 2], 16).unwrap();
-            }
+            let identity: [u8; 10] = data_encoding::HEXLOWER_PERMISSIVE
+                .decode(identity_hex.as_bytes())
+                .unwrap()
+                .try_into()
+                .unwrap();
             assert_eq!(
                 marker_from_identity(&identity),
                 expected_marker,

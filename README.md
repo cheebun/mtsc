@@ -7,7 +7,7 @@
 - **CPU-selected SHA-256 backends**: scalar, SHA-NI x1/x2/x4, AVX2 x8, AVX-512 x16, ARM SHA2 x1/x2/x4, and NEON x4. Startup detects support and calibrates once at the requested thread count; no feature detection occurs in the hashing loop.
 - **Hand-implemented MikroTik crypto primitives**: SHA-256 and MTBase64 have no MikroTik-compatible library equivalent, so both are hand-implemented; standard Curve25519 EC-KCDSA verification uses the audited `curve25519-dalek` crate instead of hand-rolled field/point arithmetic (see `docs/investigation/license-internals.md` §8.32 for why)
 - **External key configuration**: add new signatures via `keys.toml` without recompiling
-- **Flexible search**: configurable serial alphabet and padding, plus a full 2048-value MBR identity search with an embedded lookup table
+- **Flexible search**: base-36 (digit+letter) serial candidates with configurable padding, plus a full 2048-value MBR identity search with an embedded lookup table
 - **Resume search**: `--from` parameter resumes from a saved progress point
 - **Shell completion**: `completions` subcommand generates bash/zsh/fish/powershell/elvish scripts
 
@@ -23,38 +23,38 @@ RUSTFLAGS='-C target-cpu=native' cargo build --release
 
 ## Downloads
 
-Download available binaries from [GitHub Releases](https://github.com/feewg/ros-serialgen/releases).
+Download available binaries from [GitHub Releases](https://github.com/cheebun/mtsc/releases).
 Supports Linux, Windows, and macOS on x86_64 and ARM64.
 
 ## Usage
 
 ### Search for collisions
 
-`-s` takes a magnitude, `-u` sets its unit (`g` gigabytes/default, `m` megabytes, `k` kilobytes, `b` bytes). Minimum size is 64 MB regardless of unit (`-s 1 -u g`, `-s 64 -u m`, `-s 65536 -u k`, `-s 67108864 -u b`).
+`--size` takes a magnitude, `--unit` sets its unit (`g` gigabytes/default, `m` megabytes, `k` kilobytes, `b` bytes). Minimum size is 64 MB regardless of unit (`--size 1 --unit g`, `--size 64 --unit m`, `--size 65536 --unit k`, `--size 67108864 --unit b`). The CLI accepts long-form flags only -- there are no short flags.
 
 ```bash
 # Find 1 collision (default), 100 GB
-mtsc search -s 100 -t 16
+mtsc search --size 100 --threads 16
 
 # Sub-1GB sizes: 128 / 256 / 512 MB
-mtsc search -s 128 -u m -t 16
-mtsc search -s 256 -u m -t 16
-mtsc search -s 512 -u m -t 16
+mtsc search --size 128 --unit m --threads 16
+mtsc search --size 256 --unit m --threads 16
+mtsc search --size 512 --unit m --threads 16
 
 # Find 4 collisions (one per SOFTWARE ID)
-mtsc search -s 6 -t 16 -c 4
+mtsc search --size 6 --threads 16 --count 4
 
 # Unlimited collection (Ctrl+C to exit)
-mtsc search -s 6 -t 16 -c 0
+mtsc search --size 6 --threads 16 --count 0
 
 # Custom Model
-mtsc search -s 200 -t 16 -m MyDisk
+mtsc search --size 200 --threads 16 --model MyDisk
 
 # Resume from the 50000M progress point
-mtsc search -s 42 -t 8 -f 50000
+mtsc search --size 42 --threads 8 --from 50000
 
 # Specify keys.toml
-mtsc search -s 100 -t 16 -k /path/to/keys.toml
+mtsc search --size 100 --threads 16 --keys /path/to/keys.toml
 ```
 
 By default, search right-pads the natural serial with spaces (`--pad end`) and searches all 2048 MBR values. Use the reported serial **together with its identity and marker**; an identity from another result will not reproduce the same SOFTWARE ID.
@@ -62,26 +62,26 @@ By default, search right-pads the natural serial with spaces (`--pad end`) and s
 To reproduce the old zero-padded, all-zero-identity search:
 
 ```bash
-mtsc search --disk-size 100 --threads 16 --pad start --identity 00000000000000000000
+mtsc search --size 100 --threads 16 --pad start --identity 00000000000000000000
 ```
 
-`--alphabet 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ` enables alphanumeric candidates without disabling the selected CPU backend. See the [command reference](docs/reference/command-reference.md) for padding, MBR table overrides, and resume behavior.
+Candidates are always drawn from the fixed base-36 alphabet (digits then uppercase letters, `0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ`) -- there is no `--alphabet` flag. See the [command reference](docs/reference/command-reference.md) for padding, MBR table overrides, and resume behavior.
 
 ### Verify a known serial
 
 ```bash
-mtsc check --serial 00000000090681934458 -s 24 -m cheerlon
+mtsc check --serial 00000000090681934458 --size 24 --model cheerlon
 ```
 
-`check` accepts the same `-s`/`-u` disk size flags as `search`. Short numeric serials are checked with both zero-padding and space-padding; identical 20-byte inputs are checked only once. Unlike `search`, an omitted `--identity` still means the all-zero identity.
+`check` accepts the same `--size`/`--unit` disk size flags as `search`. Short numeric serials are checked with both zero-padding and space-padding; identical 20-byte inputs are checked only once. Unlike `search`, an omitted `--identity` still means the all-zero identity.
 
 On a match, prints the SOFTWARE ID, License Key, and MBR HEX. With `--bus scsi`, disk size is optional, but omitting it requires an explicit `--model`.
 
-Pass `-l/--license` with a `.key` file (or a raw 128-char signature_hex file) to compare its
+Pass `--license` with a `.key` file (or a raw 128-char signature_hex file) to compare its
 embedded SOFTWARE ID against the one computed from serial/model/disk-size/identity/bus:
 
 ```bash
-mtsc check --serial 00000000090681934458 -s 24 -m cheerlon -l license.key
+mtsc check --serial 00000000090681934458 --size 24 --model cheerlon --license license.key
 ```
 
 ### Conversion

@@ -27,33 +27,33 @@ cargo build --release
 RUSTFLAGS="-C target-cpu=native" cargo build --release
 ```
 
-The Cargo package, library, and binary are named `mtsc`; the local executable is `target/release/mtsc` (`target/release/mtsc.exe` on Windows). The GitHub repository remains `feewg/ros-serialgen`.
+The Cargo package, library, and binary are named `mtsc`; the local executable is `target/release/mtsc` (`target/release/mtsc.exe` on Windows). The GitHub repository is `cheebun/mtsc` (renamed from `ros-serialgen` alongside the package).
 
 ### Search
 
-`--disk-size` is a magnitude paired with `--unit` (`g`/`m`/`k`/`b`, default `g`, powers of 1024). Minimum supplied size is 64MiB. `--bus nvme` uses IDE's rounding; `--bus scsi` forces `sector_val=0` and can omit size if `--model` is explicit.
+`--size` is a magnitude paired with `--unit` (`g`/`m`/`k`/`b`, default `g`, powers of 1024). Minimum supplied size is 64MiB. `--bus nvme` uses IDE's rounding; `--bus scsi` forces `sector_val=0` and can omit size if `--model` is explicit.
 
-Default search sweeps all 2048 `mbr_val` values and uses `--pad end` (right spaces), so deploy each result's serial, identity, and marker together. Add `--identity 00000000000000000000 --pad start` for the old fixed-identity, zero-padded convention. `--alphabet` defaults to `0123456789` and accepts any ordered, non-repeated ASCII alphanumeric alphabet of at least two symbols. `--from` counts millions of `u64` candidate indices; keep all search parameters unchanged when resuming. See [command-reference.md](command-reference.md).
+Default search sweeps all 2048 `mbr_val` values and uses `--pad end` (right spaces), so deploy each result's serial, identity, and marker together. Add `--identity 00000000000000000000 --pad start` for the old fixed-identity, zero-padded convention. Candidates are always drawn from a fixed base-36 alphabet (digits then uppercase letters) -- there is no `--alphabet` flag. `--from` counts millions of `u64` candidate indices; keep all search parameters unchanged when resuming. See [command-reference.md](command-reference.md).
 
 ```bash
 # Search for a collision at a given disk size
-mtsc search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml
+mtsc search --size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml
 
 # Sub-1GB sizes
-mtsc search --disk-size 128 --unit m --threads <threads> --count 0 --keys keys.toml
+mtsc search --size 128 --unit m --threads <threads> --count 0 --keys keys.toml
 
 # Resume from checkpoint
-mtsc search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --from <progress_M> --keys keys.toml
+mtsc search --size <N> --unit <g|m|k|b> --threads <threads> --count 0 --from <progress_M> --keys keys.toml
 
 # Background execution
-nohup mtsc search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml \
+nohup mtsc search --size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml \
   > /tmp/results.txt 2> /tmp/progress.txt &
 ```
 
 ### Verify
 
 ```bash
-mtsc check --serial <Serial> --disk-size <N> --unit <g|m|k|b> --model <model> --identity <identity-from-search>
+mtsc check --serial <Serial> --size <N> --unit <g|m|k|b> --model <model> --identity <identity-from-search>
 ```
 
 `check` defaults to all-zero identity if omitted, not a sweep. It prints both zero- and space-padding variants for a short numeric serial, but only once if the resulting 20-byte input is identical.
@@ -91,7 +91,7 @@ mtsc verify
 | `modprobe nbd max_part=8` | Load NBD kernel module |
 | `qemu-nbd --connect=/dev/nbd0 <qcow2>` | Mount qcow2 as block device |
 | `dd of=/dev/nbd0 bs=1 seek=256 count=80` | Write 80-byte MBR license data |
-| `hexdump -C --disk-size 0x100 -n 80 /dev/nbd0` | Verify MBR license region |
+| `hexdump -C -s 0x100 -n 80 /dev/nbd0` | Verify MBR license region |
 | `qemu-nbd --disconnect /dev/nbd0` | Disconnect block device |
 
 ---
