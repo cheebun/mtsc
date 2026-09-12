@@ -11,6 +11,13 @@ Machine-executable rules for all AI tools working on this Rust project.
 ```
 src/
 ├── main.rs              CLI entry (clap subcommands) + multi-threaded search logic + tests
+├── lib.rs               SHA-256 calculation library shared with benchmarks
+├── sha256_backend.rs    CPU detection, once-only calibration, backend-owned batches
+├── sha256_cpu.rs        AArch64 detection + fail-closed macOS sysctl fallback
+├── sha256_shani.rs      SHA-NI x1/x2/x4 multi-buffer kernels (x86_64)
+├── sha256_avx2.rs       AVX2 x8 kernel (x86_64)
+├── sha256_arm.rs        ARM SHA2 x1/x2/x4 kernels (aarch64)
+├── sha256_neon.rs       NEON x4 kernel (aarch64)
 ├── sha256_constants.rs  Shared constants (ROUND_CONSTANTS + INITIAL_HASH_VALUES)
 ├── sha256.rs            MikroTik custom SHA-256 (scalar, production) + arbitrary-length digest
 ├── sha256_scalar.rs     Scalar SHA-256 backup (#[cfg(test)], for cross-validation)
@@ -56,8 +63,10 @@ ros-serialgen completions <shell>
 ## Build
 
 ```bash
-RUSTFLAGS='-C target-cpu=native' cargo build --release   # AVX-512 optimal
-cargo test          # 66+ unit tests (grows with new features -- see `cargo test` output for the exact count)
+cargo build --release   # Portable; CPU-specific kernels selected once at startup
+RUSTFLAGS='-C target-cpu=native' cargo build --release   # Optional machine-local build
+cargo bench --bench hash_backends -- --threads 1 --seconds 1 --samples 5
+cargo test          # Architecture-gated tests; see output for count and unsupported-feature skips
 cargo clippy        # a handful of pre-existing lints (too-many-arguments on CLI-plumbing functions, etc.); no new categories from recent changes
 cargo fmt --check   # format check
 ```
@@ -68,7 +77,11 @@ cargo fmt --check   # format check
 
 ## Code Rules
 
-- Single source of constants: `sha256_constants.rs`, shared by all three SHA-256 implementations
+- Single source of constants: `sha256_constants.rs`, shared by all SHA-256 implementations
+- Backend-owned batch size; do not assume 16 lanes in search or benchmark code
+- CPU feature detection and calibration are startup-only; hashing kernels must not repeat them
+- Keep generated test logs, benchmark samples, environment dumps, and build artifacts out of Git
+- CI builds/tests Linux, Windows, and macOS on x86_64 and aarch64; do not use `target-cpu=native` for distributed binaries
 - Consistent naming: `sid_lo`/`sid_hi` (not hash_lo/d4), `max_collisions` (not target_count)
 - All public functions must have `///` doc comments
 - SHA-256 implementations must annotate the reason for byte-order conversions
