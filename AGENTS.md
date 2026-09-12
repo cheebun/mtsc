@@ -102,7 +102,10 @@ disclosure restriction from the user (currently: the 99 real-hardware CCR1009 li
 - Backend-owned batch size; do not assume 16 lanes in search code
 - CPU feature detection and calibration are startup-only; hashing kernels must not repeat them
 - Keep generated logs, performance samples, environment dumps, and build artifacts out of Git
-- Keep only production library/CLI code; do not add automated test or standalone benchmark suites
+- Keep Git-tracked library/CLI code production-only; do not commit automated tests or standalone benchmark suites
+- Put all future local test scripts, harnesses, fixtures, benchmark programs, logs, and results under the gitignored `/tests/<task>/` directory; keep test-specific build output there too (for Rust harnesses, set `CARGO_TARGET_DIR` accordingly)
+- Do not embed test modules in `src/`, scatter test files elsewhere, or add local test targets to the production Cargo manifest or CI
+- Never force-add files from `/tests/`; before committing, check staged paths for test files and artifacts
 - Preserve production runtime verification: `mtsc verify`, `HashEngine::self_check`, and full SOFTWARE ID verification of search hits
 - CI builds all six Linux/Windows/macOS × x86_64/aarch64 targets, runs Clippy and formatting checks, and packages artifacts; do not use `target-cpu=native` for distributed binaries
 - Consistent naming: `sid_lo`/`sid_hi` (not hash_lo/d4), `max_collisions` (not target_count)
