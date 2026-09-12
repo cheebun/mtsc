@@ -1139,6 +1139,16 @@ fn check_match(serial_num: u64, sid_lo: u32, sid_hi: u8, ctx: &SearchContext) {
 /// TODO: reports every feasible target for this serial rather than stopping at the first
 /// (decided 2026-09-07) -- change to first-match-wins if multi-target hits per serial turn
 /// out noisy in practice. At current target counts this is astronomically rare either way.
+///
+/// Perf note (2026-09-13): a follow-up attempt replaced the `.iter().enumerate()` loop
+/// below with `mem::take`-owned-local-`Vec` plus `unsafe get_unchecked` indexing, aimed at
+/// a ~16% self-time chunk `perf` attributed to slice-iterator/`Vec`-pointer bookkeeping.
+/// Re-profiled: that specific cost dropped to ~0%, but an equivalent (slightly larger)
+/// cost reappeared as a bounds-check comparison plus `Vec`-internal pointer reads --
+/// net effect was a wash, not an improvement. Reverted rather than keeping `unsafe` code
+/// that adds review/maintenance cost for zero measured benefit. The real lever for the
+/// ~75% spent in `required_mix`/`feasible_mbr_val` themselves is SIMD, not this kind of
+/// loop-mechanics shuffling -- see `docs/benchmarks/README.md`.
 fn sweep_check_match(
     serial_num: u64,
     sid_lo: u32,

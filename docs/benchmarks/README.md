@@ -132,26 +132,67 @@ likely matter more than which SHA-256 backend is selected:
    what the hash alone can do (compare to the hash-only numbers above), because
    this scan dominates.
 
-   **Status (2026-09-13): partially addressed, not fully resolved.** Split
-   `sweep_check_match` into a hot arithmetic-only scan pass and a cold
-   MBR-lookup/verify/print pass that only runs for actual hits (previously
-   interleaved in one loop) -- a correctness-preserving refactor, cross-validated
-   against the existing `required_mix`/`feasible_mbr_val` agreement tests, zero
-   regressions. Also added `#[inline]` to `required_mix`/`feasible_mbr_val`
-   explicitly. A live A/B on the build host's 1038-target `keys.toml`
-   (~2.0 M candidates/s before and after) showed **no measurable improvement**
-   from this alone -- profiling (in progress) is needed to confirm whether the
-   scan loop is even auto-vectorizing post-refactor before deciding whether to
-   hand-write SIMD for it. Separately, a bigger algorithmic idea surfaced during
-   this same investigation: since the 2048 `mbr_val` values map to a *fixed*,
-   target-independent set of `(mix_lo, mix_hi)` pairs, the check can be inverted
-   -- for each candidate, iterate the 2048 `mbr_val` values (not the targets) and
-   look up the resulting required `(tv_lo, tv_hi)` in a `HashMap` built once from
-   `keys.toml` at startup. That makes the per-candidate cost O(2048), *decoupled
-   from `num_targets`* -- not obviously a win yet at 1038 targets, but a clear win
-   once the target count grows past ~2048 (this project's `keys.toml` has already
-   grown roughly 8x in one session). Not implemented yet; recorded here so it
-   isn't lost.
+   **Status (2026-09-13): investigated in depth via real `perf` profiling; not
+   yet resolved.** Chronology, so the reasoning isn't re-derived from scratch:
+
+   - Split `sweep_check_match` into a hot arithmetic-only scan pass and a cold
+     MBR-lookup/verify/print pass that only runs for actual hits (previously
+     interleaved in one loop), plus explicit `#[inline]` on
+     `required_mix`/`feasible_mbr_val`. Correctness-preserving, zero
+     regressions, but a live A/B (~2.0 M candidates/s before and after) showed
+     **no measurable throughput improvement**.
+   - **Real `perf record` profiling** (20s sweep run, real 1038-target
+     `keys.toml`) explained why: **~75% of self-time is `required_mix`/
+     `feasible_mbr_val`'s own arithmetic**, another **~16%** is slice-iterator/
+     `Vec`-internal pointer bookkeeping immediately around that loop, and the
+     **SHA-256 hash kernel is only ~2-3%** (AVX-512 x16 active). Confirmed via
+     `objdump` that the scan loop is **not auto-vectorized** -- plain scalar
+     GP-register instructions only, no `ymm`/`zmm`. Conclusion: further hash-
+     backend work (more SIMD widths, etc.) cannot move sweep-mode throughput at
+     all right now -- hashing was never the bottleneck. All effort belongs in
+     the scan loop.
+   - **Tried and reverted**: replaced the `.iter().enumerate()` loop with
+     `mem::take`-owned-local-`Vec` plus `unsafe get_unchecked` indexing,
+     targeting that ~16%. Re-profiled: the targeted cost (a slice-iterator
+     pointer-equality check) dropped to ~0%, but an equivalent-or-larger cost
+     reappeared as a loop-bound comparison plus `Vec`-pointer reads -- net
+     effect was a wash, not an improvement. Reverted rather than keep `unsafe`
+     code that adds review/maintenance cost for zero measured benefit.
+   - **Considered and retracted: invert the scan into a `HashMap` lookup over
+     the fixed 2048 `mbr_val` values** (since they map to a target-independent
+     set of `(mix_lo, mix_hi)` pairs, decoupling per-candidate cost from
+     `num_targets`). Retracted after estimating real costs from the profiling
+     data: the current scan's arithmetic is pure-register ALU work at roughly
+     ~0.36 ns/target (no memory latency, fully pipelined), while even a fast
+     hash-map lookup costs on the order of 5-20 ns (hashing + probable cache
+     miss on a scattered table). At 2048 lookups vs. 1038 arithmetic checks,
+     this would very likely be a **~50x regression** at the current target
+     count, not an improvement -- the break-even point is far higher than
+     2048 targets (rough estimate: tens of thousands), not "once `keys.toml`
+     exceeds 2048 entries" as originally guessed before real numbers were in
+     hand. Not implemented.
+   - **Two directions considered promising, neither attempted yet**:
+     1. **SIMD across the candidate-lane axis, not the target axis**: a hash
+        batch already produces N candidates' `(sid_lo, sid_hi)` together (16 for
+        AVX-512) -- vectorize `required_mix`/`feasible_mbr_val` to check one
+        target against all N already-batched candidates per SIMD op, instead of
+        one candidate against all targets scalar-sequentially. Reuses existing
+        batch layout (no target-array reshaping needed) at the cost of hand-
+        written 64-bit-multiply-via-32-bit-halves intrinsics (no native 64x64
+        multiply on AVX2/AVX-512 without IFMA), needing the same
+        cross-validate-against-scalar rigor as the existing hash kernels before
+        being trusted. A cheap sub-optimization noted for this path: the
+        `candidate < 2048` rejection only needs the *high* bits of the 64-bit
+        product, so a first-pass high-bits-only computation could skip the full
+        multiply for the (overwhelming majority) rejected lanes.
+     2. **SoA layout for `raw_targets`**: today's `tv_lo`/`tv_hi` are likely
+        interleaved with `name`/`signature_hex` in one `RawTarget` struct --
+        splitting the hot `tv_lo`/`tv_hi` fields into flat parallel arrays
+        would shrink the scan's working set to ~1038 x 8 bytes (fits L1 cleanly)
+        instead of touching whatever the full struct's stride is, and is close
+        to a prerequisite for direction 1 above (SIMD wants contiguous,
+        uniformly-typed data, not a strided/gather access pattern). Low risk,
+        pure data-layout change, not yet attempted.
 2. **`increment_candidate`'s per-symbol carry step does an O(alphabet-length)
    linear `.position()` scan** to find a byte's index in the (now fixed, base-36)
    `SEARCH_ALPHABET` (`src/main.rs`).
