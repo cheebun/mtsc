@@ -50,7 +50,7 @@ qm create 304 \
 | `--efidisk0 local:0` | EFI 变量盘，`0` 表示使用默认容量（64MB） |
 | `--args` | 通过 QEMU 参数设置目标磁盘的 model 和 serial。**必须在创建时指定**，否则安装后 SOFTWARE ID 会是不可预期的默认值。`device.scsi0` 对应目标磁盘的 SCSI ID |
 
-> 磁盘容量会直接影响 SOFTWARE ID 的计算结果（`sector_val = 磁盘字节数 ÷ 512`）。使用 qcow2 还是 raw 格式不影响虚拟机内部看到的磁盘大小。
+> 本例为 `scsi0`/`virtio-scsi-pci`，`sector_val` 固定为 `0`，磁盘容量不参与 SOFTWARE ID。使用 `mtsc check --bus scsi --model RouterOS-SCSI --serial 653876263836` 可不传 `--disk-size`，但必须显式指定 `--model`。短数字 serial 会分别输出左补零和右补空格的结果，应核对与虚拟机实际匹配的一项。`ide`/`nvme` 则必须提供容量，并使用相同的 sector rounding。使用 qcow2 还是 raw 格式不影响虚拟机内部看到的磁盘大小。
 
 ---
 
@@ -97,6 +97,8 @@ echo "00000000000000000000BDE800000000F4E11772DEEAED8AF43668DA5EBDAD0846B694FFE9
 dd if=/dev/nbd0 bs=1 skip=$((0x100)) count=80 | od -A x -t x1z
 qemu-nbd -d /dev/nbd0
 ```
+
+上面的固定 header 只适用于本例的全零 identity。当前 `mtsc search` 未指定 `--identity` 时会扫全部 2048 个 `mbr_val`，并默认 `--pad end` 右补空格；新结果必须一起使用输出的 serial、identity、marker，不能照抄本例 header。复现旧搜索约定需显式加 `--identity 00000000000000000000 --pad start`。
 
 上面写入的 80 字节 Hex 由四个字段拼接而成：
 

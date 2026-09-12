@@ -56,11 +56,15 @@ precomputed tail words consistent across every lane and backend. It allocates
 only when constructed. `hash()` uses a validated function pointer without CPU
 detection, dynamic backend matching, locks, calibration, or allocation.
 
-The search loop uses the selected width for thread offsets and stride:
-`start + tid × batch`, stepping by `threads × batch`. Every active result is
-checked. Regression tests cover later batches, decimal carries, both BCD and
-large-stride formatting paths, and `u64` wrap so the hashed decimal serial and
-reported numeric serial cannot diverge.
+The search loop uses backend-owned batch widths rather than assuming 16 lanes.
+Candidate generation supports the default decimal alphabet and generic ordered
+ASCII alphanumeric alphabets, with either left-symbol or right-space padding;
+fixed-identity and full-`mbr_val` sweep modes share the selected hashing backend.
+Every active result is checked and reported using its actual hashed serial.
+Candidate indices are `u64`, and `--from` is measured in millions of candidates,
+not individual MBR variants or the full mathematical `alphabet_len^20` space.
+The benchmark's BCD workload remains a decimal preparation measurement, not a
+benchmark of every alphabet/padding combination.
 
 The existing scalar `hash_10`/short-digest operations and one-off `check` calls
 remain scalar. This change targets the repeated fixed-40-byte calculation layer;

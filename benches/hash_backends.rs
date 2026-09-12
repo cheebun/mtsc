@@ -1,7 +1,7 @@
 //! Reproducible fixed-input SHA-256 throughput benchmark, independent of licenses.
 
 use clap::{Parser, ValueEnum};
-use ros_serialgen::sha256_backend::{HashBackend, HashBatch, HashEngine};
+use mtsc::sha256_backend::{HashBackend, HashBatch, HashEngine};
 use std::hint::black_box;
 use std::sync::{mpsc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -265,7 +265,7 @@ fn main() {
     for (engine, rates) in engines.iter().zip(&mut rates) {
         rates.sort_by(f64::total_cmp);
         let middle = rates.len() / 2;
-        let median = if rates.len() % 2 == 0 {
+        let median = if rates.len().is_multiple_of(2) {
             (rates[middle - 1] + rates[middle]) / 2.0
         } else {
             rates[middle]

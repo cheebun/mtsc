@@ -622,7 +622,7 @@ Priorities 3a and 3b are tried in an unspecified order relative to each other wh
 
 ### 8.14 SCSI collision search works for SOFTWARE ID -- but the license still doesn't validate
 
-The `--bus scsi` encoding from 8.11-8.13 (`sector_val=0`, standard `serial[20]+model[16]` layout) was implemented in `ros-serialgen` and run as a real search (see `docs/command-reference.md` for the `-b`/`--bus` flag). It found genuine hits -- e.g. `serial=00000000430480281048`, `model=SSD1G`, `size=1G`, `--bus scsi` computes `C7CU-PGT9`, matching this project's known signature exactly. Booting this combo on a real `scsi0` VM confirmed `software-id: C7CU-PGT9` on `/system license print`, proving the SOFTWARE ID side of 8.11-8.13 is correct and the SCSI-specific search is genuinely usable for finding *matching SOFTWARE IDs*.
+The `--bus scsi` encoding from 8.11-8.13 (`sector_val=0`, standard `serial[20]+model[16]` layout) was implemented in `mtsc` and run as a real search (see `docs/command-reference.md` for the `-b`/`--bus` flag). It found genuine hits -- e.g. `serial=00000000430480281048`, `model=SSD1G`, `size=1G`, `--bus scsi` computes `C7CU-PGT9`, matching this project's known signature exactly. Booting this combo on a real `scsi0` VM confirmed `software-id: C7CU-PGT9` on `/system license print`, proving the SOFTWARE ID side of 8.11-8.13 is correct and the SCSI-specific search is genuinely usable for finding *matching SOFTWARE IDs*.
 
 **However, writing `C7CU-PGT9`'s known-good MBR (`00...BDE800000000` + its signature) to the standard file offset `0x100` and rebooting did not activate the license** -- `/system license print` kept showing the SOFTWARE ID correctly but stayed in 24-hour trial mode (`expires-in`) instead of `nlevel: 6`. Ruled out:
 
@@ -767,9 +767,9 @@ One assumption from 8.16-8.17 needs correcting, though: it is **not** simply "x8
 
 8.11's `sector_val=0` finding was originally validated against 7 real boot tests, all on a single 1GiB disk -- leaving open whether `sector_val=0` was a genuine, size-independent property of the `scsi0` path, or coincidentally zero only for that one disk size.
 
-Retested with a **fresh install** on a **2GiB** `scsi0` disk (same host as 8.18, same `serial=00000000430480281048`/`product=SSD1G` -- only the disk size changed): full activation succeeded identically -- `software-id: C7CU-PGT9`, `nlevel: 6`, no `expires-in`, same as the 1GiB case. Since `--bus scsi` computes the same SOFTWARE ID at 1GiB and 2GiB for the same `serial=`/`product=` (both force `sector_val=0` regardless of the actual disk size passed to `ros-serialgen search -s`), and both independently activate against the same signature, this confirms `sector_val=0` is **not** a 1GiB-specific coincidence -- it holds across at least two different disk sizes on `scsi0`. The size caveat in 8.11-8.13's wording can be considered resolved for x86_64/`virtio-scsi-pci`.
+Retested with a **fresh install** on a **2GiB** `scsi0` disk (same host as 8.18, same `serial=00000000430480281048`/`product=SSD1G` -- only the disk size changed): full activation succeeded identically -- `software-id: C7CU-PGT9`, `nlevel: 6`, no `expires-in`, same as the 1GiB case. Since `--bus scsi` computes the same SOFTWARE ID at 1GiB and 2GiB for the same `serial=`/`product=` (both force `sector_val=0` regardless of the actual disk size passed to `mtsc search -s`), and both independently activate against the same signature, this confirms `sector_val=0` is **not** a 1GiB-specific coincidence -- it holds across at least two different disk sizes on `scsi0`. The size caveat in 8.11-8.13's wording can be considered resolved for x86_64/`virtio-scsi-pci`.
 
-**Practical implication: on `scsi0`, the actual disk size is irrelevant to which `serial=`/`product=` combo you need.** This is a real, useful difference from `ide0`: `ide0`'s SOFTWARE ID depends on `sector_val`, which is derived from the disk's exact byte count, so an `ide0` collision result is only valid for a disk of that *exact* size (§6, §3.4). On `scsi0`, since `sector_val` is always `0` regardless of the disk's real size, **a single `serial=`/`product=` combo found via `ros-serialgen search --bus scsi --disk-size <any size>` will activate on a `scsi0` disk of *any* size** -- there is no need to match the search size to the deployed disk size, and no need to maintain size-specific tables the way `docs/database/collision-database.md` §2 does for `ide0`. The `--disk-size`/`--unit` flags still need *some* value when running `search --bus scsi` (they're required CLI arguments), but the resulting `serial=`/`product=` pair is size-agnostic in practice for `scsi0` deployments.
+**Practical implication: on `scsi0`, the actual disk size is irrelevant to which `serial=`/`product=` combo you need.** This is a real, useful difference from `ide0`: `ide0`'s SOFTWARE ID depends on `sector_val`, which is derived from the disk's exact byte count, so an `ide0` collision result is only valid for a disk of that *exact* size (§6, §3.4). On `scsi0`, since `sector_val` is always `0` regardless of the disk's real size, **a single `serial=`/`product=` combo found via `mtsc search --bus scsi --disk-size <any size>` will activate on a `scsi0` disk of *any* size** -- there is no need to match the search size to the deployed disk size, and no need to maintain size-specific tables the way `docs/database/collision-database.md` §2 does for `ide0`. The `--disk-size`/`--unit` flags still need *some* value when running `search --bus scsi` (they're required CLI arguments), but the resulting `serial=`/`product=` pair is size-agnostic in practice for `scsi0` deployments.
 
 ### 8.20 `sata0` is NOT like `scsi0` -- it uses the exact same encoding as `ide0`
 
@@ -779,7 +779,7 @@ QEMU's `sata0` (AHCI) disks are backed by the **same `ide-hd` qdev device model 
 
 Confirmed both algorithmically and empirically:
 
-- **Algorithmic**: booting a `sata0` disk with `serial=00000000430480281048`/`model=SSD1G` (the SCSI-verified `C7CU-PGT9` combo from §8.14) at 2GiB showed `Current installation "software ID": EJSX-HUUP` -- a **different** ID than the `scsi0` result for the identical `serial=`/`model=` pair. Running `ros-serialgen check --serial 00000000430480281048 --disk-size 2 --unit g --model SSD1G --bus ide` (note: `--bus ide`, not `scsi`) computes the **exact same** `EJSX-HUUP` -- confirming `sata0` uses `ide0`'s real-sector_val encoding, not `scsi0`'s `sector_val=0` encoding.
+- **Algorithmic**: booting a `sata0` disk with `serial=00000000430480281048`/`model=SSD1G` (the SCSI-verified `C7CU-PGT9` combo from §8.14) at 2GiB showed `Current installation "software ID": EJSX-HUUP` -- a **different** ID than the `scsi0` result for the identical `serial=`/`model=` pair. Running `mtsc check --serial 00000000430480281048 --disk-size 2 --unit g --model SSD1G --bus ide` (note: `--bus ide`, not `scsi`) computes the **exact same** `EJSX-HUUP` -- confirming `sata0` uses `ide0`'s real-sector_val encoding, not `scsi0`'s `sector_val=0` encoding.
 - **Empirical, with an existing `ide0` collision-database entry**: a fresh 1GiB `sata0` install using the *unmodified* `ide0` table entry (`serial=00000000251582663387`, `model=SSD1G`, `1,073,741,824` bytes -> `TI09-7WK3`, no new search needed) with the standard MBR write (`00...BDE800000000` + `TI09-7WK3`'s signature) **fully activated** on first boot -- confirming this isn't just a matching-SOFTWARE-ID coincidence, the *existing* `ide0` collision database works directly on `sata0`.
 
 **Practical implication:** `docs/collision-database.md`'s `ide0` table (§1-2) applies directly to `sata0` disks of the same size, with no `-b scsi`/`-b ide` distinction needed and no new search required -- treat `sata0` as an alias for `ide0` for collision-search purposes, not as part of the `scsi0` SCSI-generic family. This also means `--bus ide`'s existing wording ("verified against real hardware") extends to `sata0` without qualification, while `--bus scsi` remains specific to `scsi0`/`virtio-scsi-pci` only. `docs/deployment-guide.md` and `docs/command-reference.md`'s bus-type framing (currently grouping `scsi0`+`sata0` together against `ide0`) should be corrected to reflect this.
@@ -796,7 +796,7 @@ signature[32:64] -- the actual Curve25519 signature integer
 
 `MT_Transform` is a 16-round ARX block cipher operating on the 16-byte block as four 32-bit words, using round constants -- **which turn out to be exactly this project's existing `ROUND_CONSTANTS`** (`src/sha256_constants.rs`, the MikroTik custom SHA-256 K-table): confirmed byte-for-byte identical against `MTTools.py`'s `SHA256_K`. The decrypted SOFTWARE ID's Base-35 encoding table (`MT_SWSNToSWID`'s `SWIDTab`) is likewise identical to this project's existing `software_id::encode` alphabet. No new reverse-engineered constants were needed -- both pieces were already in this codebase, just not previously connected to this use.
 
-**What this enables:** given any known-valid signature (from `docs/collision-database.md`'s Signature Table, or extracted from a `.key` file via `key2sig`), decrypting `signature[0:16]` reveals which SOFTWARE ID and license level that signature was actually issued for -- useful for auditing/labeling signatures, independent of booting a VM. `ros-serialgen sig2key`/`key2sig` now print this (`SOFTWARE-ID`/`VERSION`/`LEVEL`) to stderr alongside their normal output (`src/convert.rs`'s `decode_metadata`). Verified against `VI8Q-E90F`'s known signature hex (`docs/collision-database.md`): decrypts to SOFTWARE ID `VI8Q-E90F`, level `1` -- matching the real-hardware-confirmed `nlevel: 1` from §1.
+**What this enables:** given any known-valid signature (from `docs/collision-database.md`'s Signature Table, or extracted from a `.key` file via `key2sig`), decrypting `signature[0:16]` reveals which SOFTWARE ID and license level that signature was actually issued for -- useful for auditing/labeling signatures, independent of booting a VM. `mtsc sig2key`/`key2sig` now print this (`SOFTWARE-ID`/`VERSION`/`LEVEL`) to stderr alongside their normal output (`src/convert.rs`'s `decode_metadata`). Verified against `VI8Q-E90F`'s known signature hex (`docs/collision-database.md`): decrypts to SOFTWARE ID `VI8Q-E90F`, level `1` -- matching the real-hardware-confirmed `nlevel: 1` from §1.
 
 **What this does NOT enable:** signing a *new* license for an arbitrary SOFTWARE ID/level still requires the Curve25519 private key corresponding to the public key used in `ParseLic.py`'s verification (`Y = signature*PubKey + hash*G`, checked via `MT_Hash(Y) == signature[16:32]`) -- an ECDLP problem, same ~252-bit hardness already established in `architecture.md` §5. This finding only explains the *structure* of an existing signature; it does not provide a way to forge one for parameters not already covered by a known-valid signature. The project's approach remains unchanged: reuse existing valid signatures via SOFTWARE ID collision search (§1-7), not signature forgery.
 
@@ -1056,9 +1056,9 @@ A third-party writeup (CSDN, "MikroTik RouterOS 授权签名验证分析", https
 
 ### 8.33 First independent, real-world validation of the `curve25519.rs` EC-KCDSA verifier -- against an externally-supplied license, not our own test data
 
-Source: [github.com/cheebun/ros-serialgen issue #2](https://github.com/cheebun/ros-serialgen/issues/2), which links a real `.key` file (`W5EY-LHT9.KEY`, hosted at a third-party GitHub repo) and includes a manual verification trace from a commenter (`MurVlad`) using the independent Python reference (`ParseLic.py`).
+Source: [github.com/cheebun/mtsc issue #2](https://github.com/cheebun/mtsc/issues/2), which links a real `.key` file (`W5EY-LHT9.KEY`, hosted at a third-party GitHub repo) and includes a manual verification trace from a commenter (`MurVlad`) using the independent Python reference (`ParseLic.py`).
 
-**Ran `ros-serialgen key2sig` directly against the fetched `.key` file content (not against any of this project's own known-good signatures) and compared byte-for-byte against `MurVlad`'s independently-produced manual trace:**
+**Ran `mtsc key2sig` directly against the fetched `.key` file content (not against any of this project's own known-good signatures) and compared byte-for-byte against `MurVlad`'s independently-produced manual trace:**
 
 | Field | Our tool | `MurVlad`'s manual trace |
 |---|---|---|
@@ -1074,9 +1074,9 @@ Exact match on every field. This is the first time `curve25519.rs`'s `curve25519
 
 ### 8.34 Real-hardware confirmation: `scsi0` collision search reused against an externally-supplied signature (`J1WN-449W`), full offline activation, no network
 
-Continuing §8.33 with a second externally-supplied license found in the wild ([github.com/xSomoy/Study, `J1WN-449W.key`](https://github.com/xSomoy/Study/blob/e0f91d53cc60d509d2f5b38642467fcb5a89c1f7/Networking/Mikrotik-6/J1WN-449W.key)). `ros-serialgen key2sig` decoded it independently: `Software ID: J1WN-449W`, `Router OS Version: 6`, `License Level: 1`, `License valid: true`. Unlike `W5EY-LHT9` (§8.33), no report of this specific ID being blocklisted was found anywhere.
+Continuing §8.33 with a second externally-supplied license found in the wild ([github.com/xSomoy/Study, `J1WN-449W.key`](https://github.com/xSomoy/Study/blob/e0f91d53cc60d509d2f5b38642467fcb5a89c1f7/Networking/Mikrotik-6/J1WN-449W.key)). `mtsc key2sig` decoded it independently: `Software ID: J1WN-449W`, `Router OS Version: 6`, `License Level: 1`, `License valid: true`. Unlike `W5EY-LHT9` (§8.33), no report of this specific ID being blocklisted was found anywhere.
 
-**Ran a dedicated `-b scsi` collision search against this signature (fixed `model=RouterOS-SCSI`, `sector_val=0` regardless of disk size per §8.19) and found two colliding serials in ~4386s on a 2-core host** (`serial=00000000394117852659` and `serial=00000000547437415680`, both independently re-verified via `ros-serialgen check`).
+**Ran a dedicated `-b scsi` collision search against this signature (fixed `model=RouterOS-SCSI`, `sector_val=0` regardless of disk size per §8.19) and found two colliding serials in ~4386s on a 2-core host** (`serial=00000000394117852659` and `serial=00000000547437415680`, both independently re-verified via `mtsc check`).
 
 **Full offline end-to-end activation test, network-isolated (no `net0` device on the test VM at all)**, on a disposable VM (`VM301`, x86_64/`q35`, `scsihw=virtio-scsi-pci`, `scsi0` with `serial=00000000394117852659` + `-args '-set device.scsi0.product=RouterOS-SCSI'` for the product/model field, since PVE's native `--scsi0` syntax doesn't expose `product=` directly -- matches the exact mechanism already confirmed in §8.14/§8.18):
 
@@ -1086,13 +1086,13 @@ Continuing §8.33 with a second externally-supplied license found in the wild ([
 
 **Result: `/system license print` shows `software-id: J1WN-449W`, `nlevel: 1` -- no `expires-in` line, no `ROUTER HAS NO SOFTWARE KEY` trial banner at boot.** This is unambiguous full activation, achieved with zero network connectivity at any point (install media is local ISO, no `net0` device exists on the VM) -- confirming this specific SOFTWARE ID's local, offline signature verification succeeds on real (well, production-topology) x86_64 hardware, entirely independent of MikroTik's online license servers.
 
-**What this confirms:** the collision-search method (§1-7) generalizes cleanly to externally-sourced signatures found via community reports, not just this project's own curated `keys.toml` entries -- `ros-serialgen search --bus scsi` found a working collision for a signature this project had never seen before, and that collision activated for real. (This section originally speculated here about *why* `W5EY-LHT9` might be blocked, reasoning from `J1WN-449W`'s clean success alone -- §8.35 tested `W5EY-LHT9` directly instead, and that speculation turned out to be wrong. See §8.35.)
+**What this confirms:** the collision-search method (§1-7) generalizes cleanly to externally-sourced signatures found via community reports, not just this project's own curated `keys.toml` entries -- `mtsc search --bus scsi` found a working collision for a signature this project had never seen before, and that collision activated for real. (This section originally speculated here about *why* `W5EY-LHT9` might be blocked, reasoning from `J1WN-449W`'s clean success alone -- §8.35 tested `W5EY-LHT9` directly instead, and that speculation turned out to be wrong. See §8.35.)
 
 ### 8.35 `W5EY-LHT9` directly tested, real hardware, two different signatures -- both fail locally, offline, confirming §8.33's "blocked" report and overturning §8.34's speculation about *why*
 
 §8.34 closed by speculating that `W5EY-LHT9`'s reported block was "most plausibly server-side/online-only," reasoning from `J1WN-449W`'s unrelated success rather than a direct test. That speculation is now known to be **wrong** -- tested directly, on the same real-hardware/offline setup as §8.34.
 
-**Found a second `scsi0` collision for `W5EY-LHT9` itself** (a different `serial=`/`product=` combo than §8.33's decode target -- `serial=00000000249663178723`, `product="QEMU HARDDISK"` this time, found and supplied externally rather than by this project's own search run), independently re-verified via `ros-serialgen check` before use. (Aside, purely mechanical: PVE's `args:` config line splits on whitespace with no quoting support of its own, so a `product=` value containing a space -- `QEMU HARDDISK` -- must be wrapped in literal quote characters *within* the `args:` string, e.g. `-args '-set device.scsi0.product="QEMU HARDDISK"'`, or the value silently splits into two broken arguments and QEMU fails to start.)
+**Found a second `scsi0` collision for `W5EY-LHT9` itself** (a different `serial=`/`product=` combo than §8.33's decode target -- `serial=00000000249663178723`, `product="QEMU HARDDISK"` this time, found and supplied externally rather than by this project's own search run), independently re-verified via `mtsc check` before use. (Aside, purely mechanical: PVE's `args:` config line splits on whitespace with no quoting support of its own, so a `product=` value containing a space -- `QEMU HARDDISK` -- must be wrapped in literal quote characters *within* the `args:` string, e.g. `-args '-set device.scsi0.product="QEMU HARDDISK"'`, or the value silently splits into two broken arguments and QEMU fails to start.)
 
 **Reused the same already-installed `VM301` disk for both tests in this section -- no reinstall between them.** Per this project's standard rule (install once, MBR write can be repeated freely -- only the *installer* overwrites `0x10A-0x10B`, not a later boot), each test only required: stop the VM, change `scsi0`'s `serial=`/`args` `product=` to the new combo, rewrite the 80-byte identity+marker+signature block via the same `qemu-nbd` procedure as §8.34, restart.
 
@@ -1102,7 +1102,7 @@ Continuing §8.33 with a second externally-supplied license found in the wild ([
 
 **Conclusion: both cryptographically-valid `W5EY-LHT9` signatures fail the same way, locally, with zero network access at any point.** This rules out §8.34's speculation cleanly -- if the rejection were online/server-side only, a fully network-isolated VM could never observe it, since there is no path for it to even attempt contacting MikroTik. It also rules out "this one specific signature file was corrupted/mistyped" -- two independently-sourced signatures, decoding to different raw bytes but the same `Software ID`, both fail identically. The most coherent remaining explanation: **RouterOS 7.23.2's local, offline verification path checks something beyond the raw EC-KCDSA signature math for this specific SOFTWARE ID** -- most plausibly a hardcoded or otherwise locally-shipped blocklist of specific `SOFTWARE ID`s known to MikroTik to have been abused (the reported mechanism for "this license has been abused too much and has been blocked" line up with this being a *known, curated* blocklist rather than some accidental or narrow one-off signature defect) -- keyed on the `SOFTWARE ID` itself, not on the specific signature bytes, since both signatures (`8EBD34F8...` and `0AC14BD0...`) share the same ID and both were rejected identically. **Not yet located**: the actual code path in `keyman_arm32`/`keyman_x86_7.23.2` that performs this check has not been disassembled or found -- this section establishes the *behavior* (local offline blocklisting exists and is real) via black-box testing, not the mechanism. Finding it would require locating a data structure or comparison specifically keyed on SOFTWARE ID/software-id-derived values, separate from the EC-KCDSA verify path already mapped in §8.24-8.32 (which only concerns itself with *whether a signature is cryptographically valid*, not whether its Software ID is on any kind of list).
 
-**Practical implication for this project:** the collision-search method's own validity is unaffected -- any SOFTWARE ID successfully found via collision search and confirmed to activate (as `J1WN-449W` was, §8.34) remains genuinely activatable. But it establishes, for the first time with direct real-hardware evidence, that **not every valid signature is safe to rely on** -- a specific ID being widely shared/reused in public `.key` file repositories appears to be a real risk factor for that ID ending up on a local blocklist, independent of anything about the collision-search technique itself. This is a new category of failure mode for this project's practical guidance: verifying a signature is cryptographically valid (`ros-serialgen`'s `LICENSE-VALID: true`) is necessary but **not sufficient** to guarantee it will actually activate on current RouterOS versions.
+**Practical implication for this project:** the collision-search method's own validity is unaffected -- any SOFTWARE ID successfully found via collision search and confirmed to activate (as `J1WN-449W` was, §8.34) remains genuinely activatable. But it establishes, for the first time with direct real-hardware evidence, that **not every valid signature is safe to rely on** -- a specific ID being widely shared/reused in public `.key` file repositories appears to be a real risk factor for that ID ending up on a local blocklist, independent of anything about the collision-search technique itself. This is a new category of failure mode for this project's practical guidance: verifying a signature is cryptographically valid (`mtsc`'s `LICENSE-VALID: true`) is necessary but **not sufficient** to guarantee it will actually activate on current RouterOS versions.
 
 ### 8.36 External data point (unverified) -- `XGWP-9N00` / `D7240F566244`, real RouterBOARD `RBLtAP-2HnD`
 
@@ -1170,13 +1170,13 @@ An external project, [`loskiq/MikroTikPatch`](https://github.com/loskiq/MikroTik
 
 - `mikro.py`'s `MIKRO_SHA256_K` table and custom IV (`0x5B653932, 0x7B145F8F, ...`) are **byte-identical** to this project's `sha256_constants.rs` -- independent confirmation from a second, unrelated codebase.
 - Its hardcoded `MIKRO_LICENSE_PUBLIC_KEY = "8E1067E4305FCDC0CFBF95C10F96E5DFE8C49AEF486BD1A4E2E96C27F01E3E32"` matches this project's own EC-KCDSA public key (§8.32) exactly.
-- **CHR's 16-byte decoded payload layout differs from ROS's**: ROS is `software_id(6B) + version(1B) + level(1B) + reserved(8B)` (this project's existing format); CHR is `system_id(8B) + 3 unknown bytes + deadline(1B) + level(1B) + 3 reserved bytes`. `mikro_systemid_encode`/`decode` use the *same* base64-style character table as the outer Key-text encoding (`ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/`), not the ROS `SOFTWARE_ID_CHARACTER_TABLE` -- a different alphabet from `TN0BYX18S5HZ4IA67DGF3LPCJQRUK9MW2VE`, and produces an 11-character (not 8-character/`XXXX-XXXX`) identifier.
+- **CHR's 16-byte decoded payload layout differs from ROS's**: ROS is `software_id(6B) + version(1B) + level(1B) + reserved(8B)` (this project's existing format); CHR is `opaqueId(8B) + deadline(4B) + level(1B) + reserved(3B)` -- **correction (2026-09-09, see §8.42)**: this was originally recorded here as `system_id(8B) + 3 unknown bytes + deadline(1B) + level(1B) + 3 reserved bytes`, based on `loskiq/MikroTikPatch`'s `varb9`/`varb10`/`varb11`/`varb12` naming (4 separate single-byte fields at payload offsets 8-11). Direct `keyman_x86_7.24.1` disassembly (§8.42) proves these 4 bytes are read and compared as a single little-endian 32-bit Unix-epoch `deadline` field, never accessed individually -- the "3 unknown bytes" never existed as independent fields, they're just the low 24 bits of `deadline`. The raw byte layout/values are unaffected (concatenating 4 individually-encoded bytes in order produces byte-identical output to encoding one LE u32), only the field-count/semantics were wrong. `mikro_systemid_encode`/`decode` use the *same* base64-style character table as the outer Key-text encoding (`ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/`), not the ROS `SOFTWARE_ID_CHARACTER_TABLE` -- a different alphabet from `TN0BYX18S5HZ4IA67DGF3LPCJQRUK9MW2VE`, and produces an 11-character (not 8-character/`XXXX-XXXX`) identifier.
 
-**A specific CHR license text pasted into this session** (`System ID: eJq8zK/UrhN`, `Deadline: 244`, `Level: 3`) was decoded using this reimplementation and independently verified against this project's own `ros-serialgen key2sig` (using the real MikroTik public key): `License valid: false`, with a `reserved bytes not all zero` warning (expected, since the bytes are CHR-format, not ROS-format). More tellingly, the decoded "unknown" filler bytes (`varb9=0, varb10=87, varb11=134`) **exactly match** `lic_gen_chr()`'s own hardcoded example defaults in `license.py`. This is strong circumstantial evidence that this specific license was generated by that tool's own `licgenchr` self-signing command (using a locally-generated key pair, per its `genkey` subcommand -- which explicitly documents patching `keyman`'s embedded public key to trust an attacker-controlled key) rather than being a genuine MikroTik-issued CHR license. This is a fundamentally different technique from this project's SOFTWARE-ID collision search -- it requires binary-patching the target's trusted public key, not finding a serial/model that reproduces a target ID.
+**A specific CHR license text pasted into this session** (`System ID: eJq8zK/UrhN`, `Deadline: 244`, `Level: 3`) was decoded using this reimplementation and independently verified against this project's own `mtsc key2sig` (using the real MikroTik public key): `License valid: false`, with a `reserved bytes not all zero` warning (expected, since the bytes are CHR-format, not ROS-format). More tellingly, the decoded "unknown" filler bytes (`varb9=0, varb10=87, varb11=134`) **exactly match** `lic_gen_chr()`'s own hardcoded example defaults in `license.py`. This is strong circumstantial evidence that this specific license was generated by that tool's own `licgenchr` self-signing command (using a locally-generated key pair, per its `genkey` subcommand -- which explicitly documents patching `keyman`'s embedded public key to trust an attacker-controlled key) rather than being a genuine MikroTik-issued CHR license. This is a fundamentally different technique from this project's SOFTWARE-ID collision search -- it requires binary-patching the target's trusted public key, not finding a serial/model that reproduces a target ID.
 
 ### 8.39 ARM32 `keyman`'s hardware-identity call chain fully mapped (`getHardwareID` → `/dev/flash` / real-disk / string-fallback), and an exhaustive proof that neither of its two SOFTWARE-ID "combine" formulas can produce `XU4M-NJ40`
 
-Triggered by an externally-supplied real-hardware case: `Model=C52iG-5HaxD2HaxD` (RouterBOARD, `ipq6000` SoC), `Serial=HE508Y4T7YB`, claimed working `SOFTWARE ID=XU4M-NJ40` (KEY text decoded and independently confirmed to encode exactly this ID, `Version=6`, `Level=4`, reserved bytes all zero -- genuine ROS format, not CHR). `ros-serialgen check` with both `-b ide` and `-b scsi` (standard identity) computes different, non-matching IDs (`EUSF-AK1K`, `3GC2-T9RD`) for this serial/model/size -- as does an exhaustive enumeration of all 2048 possible non-standard `-i` identities (§ prior turn, both bus types) -- so this thread pivoted to disassembling `keyman_arm32` itself to find the *real* algorithm real hardware uses, rather than continuing to guess inputs for the x86/VM-calibrated formula.
+Triggered by an externally-supplied real-hardware case: `Model=C52iG-5HaxD2HaxD` (RouterBOARD, `ipq6000` SoC), `Serial=HE508Y4T7YB`, claimed working `SOFTWARE ID=XU4M-NJ40` (KEY text decoded and independently confirmed to encode exactly this ID, `Version=6`, `Level=4`, reserved bytes all zero -- genuine ROS format, not CHR). `mtsc check` with both `-b ide` and `-b scsi` (standard identity) computes different, non-matching IDs (`EUSF-AK1K`, `3GC2-T9RD`) for this serial/model/size -- as does an exhaustive enumeration of all 2048 possible non-standard `-i` identities (§ prior turn, both bus types) -- so this thread pivoted to disassembling `keyman_arm32` itself to find the *real* algorithm real hardware uses, rather than continuing to guess inputs for the x86/VM-calibrated formula.
 
 **`keyman_arm_7.24.1`** (extracted this session from the current `routeros-7.24.1-arm64.npk`, i.e. what genuinely ships for ARM64-architecture devices) **is byte-identical (MD5 `ebdaa0f2f1b71cb535490c8e93c2c754`) to the pre-existing `keyman_arm32`** used throughout §8.24-8.32 -- confirming MikroTik ships the same 32-bit ARM binary for the "arm64" architecture package; there is no separate aarch64 `keyman` build, and all `keyman_arm32` findings apply directly to real ARM64 RouterBOARD hardware like this device.
 
@@ -1200,17 +1200,17 @@ Triggered by an externally-supplied real-hardware case: `Model=C52iG-5HaxD2HaxD`
 
 **Also confirmed this session, filed for reference:** `tools/bin/` binaries were renamed to a consistent `keyman_{arch}_{version}` scheme (`keyman_x86_7.23.2`, `keyman_x86_7.24.1`, `keyman_arm_7.24.1`), with all path references across `README.md`, `AGENTS.md`, `tools/README.md`, `docs/toolchain.md`, `tools/rust/docs/architecture.md`, and `curve25519.rs` updated to match.
 
-### 8.40 Confirmed discrepancy: `ros-serialgen`'s own SOFTWARE ID computation disagrees with a real x86 `keyman` (RouterOS 6.49.13) at exact byte size `1,117,782,016` (real device, non-standard identity) -- open, unexplained, needs investigation
+### 8.40 Confirmed discrepancy: `mtsc`'s own SOFTWARE ID computation disagrees with a real x86 `keyman` (RouterOS 6.49.13) at exact byte size `1,117,782,016` (real device, non-standard identity) -- open, unexplained, needs investigation
 
 While tracing a real device's `VI8Q-E90F`/Level-4 signature (issue #1, MurVlad's reflashed x86 machine, `model=QEMU HARDDISK`, `serial=QM00001`, identity `50508089413009661362`, marker `0362`), two different real disk images of the *same physical device* gave conflicting exact byte sizes:
 
-- A partial capture (first 10MB, MBR + partition table only) implied a lower bound of `1,071,645,184` bytes from the last partition's end sector. Building a fresh PVE VM with **exactly this size** and the identity/marker/signature above reproduced `software-id: VI8Q-E90F`, `nlevel: 4`, no `expires-in` -- confirmed genuine, permanent activation, both via `ros-serialgen check` (matches) and real RouterOS 7.24.1 boot.
+- A partial capture (first 10MB, MBR + partition table only) implied a lower bound of `1,071,645,184` bytes from the last partition's end sector. Building a fresh PVE VM with **exactly this size** and the identity/marker/signature above reproduced `software-id: VI8Q-E90F`, `nlevel: 4`, no `expires-in` -- confirmed genuine, permanent activation, both via `mtsc check` (matches) and real RouterOS 7.24.1 boot.
 - A separate, older full-disk backup (Proxmox VMA, RouterOS 6.49.13, `2024-02-21`) of the *same device* extracted to a raw image of exactly `1,117,782,016` bytes (`qemu-img info` confirms QEMU sees this as the exact virtual size, no hidden padding). Booting this raw disk directly (not reconstructed -- the device's own real data) also shows `software-id: VI8Q-E90F`, `nlevel: 4`, no `expires-in` on real RouterOS **6.49.13**.
 
-Both real disks -- different exact byte sizes, same identity/marker/signature -- genuinely activate as `VI8Q-E90F`/Level 4. But `ros-serialgen check` with the *second* disk's exact byte size (`--disk-size 1117782016 --unit b`, same serial/model/identity) computes a **different** SOFTWARE ID (`7SQU-S9AM`), not `VI8Q-E90F`:
+Both real disks -- different exact byte sizes, same identity/marker/signature -- genuinely activate as `VI8Q-E90F`/Level 4. But `mtsc check` with the *second* disk's exact byte size (`--disk-size 1117782016 --unit b`, same serial/model/identity) computes a **different** SOFTWARE ID (`7SQU-S9AM`), not `VI8Q-E90F`:
 
 ```
-./target/release/ros-serialgen check --serial QM00001 --disk-size 1117782016 --unit b \
+./target/release/mtsc check --serial QM00001 --disk-size 1117782016 --unit b \
   --model "QEMU HARDDISK" --identity 50508089413009661362
 # Software ID: 7SQU-S9AM  (❌ does not match the real device's VI8Q-E90F)
 ```
@@ -1223,3 +1223,565 @@ This is a **confirmed, reproducible disagreement** between this project's own SO
 
 **Not yet done:** disassembling the exact `sector_val` derivation path in both `keyman_x86_7.23.2`/`7.24.1` (already partially covered by earlier sections) against a from-scratch trace using this specific byte count, and checking whether RouterOS 6.x's `keyman` (not yet extracted/disassembled by this project) computes `sector_val` identically to 7.x. This is flagged prominently rather than silently worked around, since it means **this project's own algorithm cannot currently be trusted to be correct in this size range** until resolved.
 
+### 8.41 Two reproducible workflows for pulling the embedded EC-KCDSA public key out of a `keyman` binary -- `objdump`/CLI and IDA Free's GUI decompiler, cross-validated against each other on a *patched* `keyman` with a substituted key
+
+Both methods locate the same eight `mov [stack_offset], imm32` instructions found in §8.32 (function `0x804f4c6`, instructions at `0x804f658-0x804f6a2`), read as the public key's 32 bytes in little-endian, 4-byte-at-a-time order. Demonstrated end-to-end against a *different, patched* `keyman` binary (outside this repo, `/Volumes/未命名/Data/tmp/patch-web/keyman`) whose embedded key differs from §8.32's -- confirming both methods agree with each other and correctly distinguish a patched key from the stock one, not just re-deriving the same known-good answer.
+
+**Method A -- `objdump` (CLI, no GUI required, matches §8.32's original process):**
+
+1. `strings -a -t x keyman | grep -i "software key\|BEGIN MIKROTIK"` -- confirms the binary handles the local `.key`-file format, gives anchor string file offsets.
+2. `objdump -h keyman` (get `.rodata`'s VMA) + `objdump -p keyman` (get the enclosing `LOAD` segment's `off`/`vaddr`) -- gives the file-offset-to-VMA delta for that segment (`+0x08048000` for this class of ET_EXEC i386 binary).
+3. `objdump -d -r keyman > disasm.txt`, then `grep -n "<anchor VMA in hex, no 0x prefix>"` -- finds the `pushl $<addr>`-style references, which pinpoints the enclosing function.
+4. Read that function's body: an ARX decode loop, immediately followed by **eight consecutive `movl $imm32, stack_offset(%ebp)` instructions** -- the public key, compiled as immediates rather than a contiguous data blob (why a plain byte-string search of `.rodata`/`.data` never finds it).
+5. Concatenate the 8 little-endian dwords in program order to get the 32-byte key.
+
+**Method B -- IDA Free 9.4's GUI + bundled Hex-Rays Cloud Decompiler (F5), no `idat`/`idat64` batch CLI needed (IDA Free doesn't ship one -- that's IDA Pro-only):**
+
+1. Open the binary in IDA, let initial auto-analysis finish (Output window says "The initial autoanalysis has been finished").
+2. `Jump!` dialog (the address-jump box) → type the target function address (from Method A, or from a prior analysis of the same binary if addresses are known to match) → Enter, to land in the disassembly graph view.
+3. Visually confirm the 8 `mov [ebp+var_XX], imm32h` instructions in the graph node -- IDA already shows them in hex, so no manual decimal-to-hex conversion is needed at this stage.
+4. Optionally press `F5` to decompile -- the same 8 constants appear as `v28[0..7] = <decimal>` inside a local array later passed into the scalarmult call (`sub_804DBA2(a1: v28)` in this session's run), which is useful for confirming the constants are actually used as the verification public key (not just coincidentally-placed bytes) and that the surrounding algorithm (XOR-combine, X25519 clamp, final `memcmp`) is unmodified.
+5. **To go from the decompiler's decimal values back to the key bytes:** convert each to hex (negative decompiler values are the imm32 read as signed -- add `2^32` before converting, or just read the values from the disassembly view in hex instead of the decompiler's decimal, which sidesteps the conversion entirely), then byte-swap each 4-byte hex value (little-endian storage: `0x49011527` → bytes `27 15 01 49`), then concatenate all 8 byte-swapped groups in program order (`v28[0]`'s bytes first) to get the final 32-byte public key.
+
+**Result on the patched binary (both methods agreed):** `271501494893987A0A50D41DFC7500FFD4F7B32F455F2C0E7C7439D3BD7B0876` -- confirmed different from this project's own `LICENSE_PUBLIC_KEY` (`src/curve25519.rs`) / §8.32's stock key (`8E1067E4305FCDC0CFBF95C10F96E5DFE8C49AEF486BD1A4E2E96C27F01E3E32`), consistent with this being a `MikroTikPatch`-style binary (§8.32's closing paragraph) where the embedded verification public key was swapped for a self-generated one, so a matching self-held private key can locally sign arbitrary licenses. The `keyman` binary itself only carries the *verification* side (the swapped-in public key); it does not on its own reveal the private key or a signing tool -- that would need to be separately found/analyzed if pursued further.
+
+### 8.42 CHR license payload layout corrected (deadline is one 4-byte field, not "3 unknown + 1"), `/system license print`'s 5 CHR display fields traced to source, `.npk` format decoded, and console-resource field-ID bindings partially confirmed
+
+This session revisited CHR licensing (§8.38) after the user proposed a more granular payload split (`opaqueId(8) + ??(1) + ??(1) + regdate(1) + renewdate(1) + level(1) + 000(3)`). Neither the original §8.38 layout nor the user's proposed split survived direct disassembly -- the correct layout, confirmed by instruction-level tracing, is:
+
+```
+offset 0-7    opaqueId    8 bytes (the payload's own copy of the id -- NOT what /system license print's "System ID" shows, see below)
+offset 8-11   deadline    4 bytes, little-endian u32 Unix epoch. 0xFFFFFFFF (-1) = permanent, no deadline.
+offset 12     level       1 byte
+offset 13-15  reserved    3 bytes, expected zero
+```
+
+**Deadline is one field, not four.** Function `0x804f718` in `keyman_x86_7.24.1` extracts payload bytes 8-11 as a single dword and payload byte 12 as a separate byte -- there is no code anywhere that reads bytes 8, 9, or 10 individually. The 4-byte dword is compared exactly once, against `time()`, at its sole caller `0x8051b6f` (inside the license-info function `0x8051a9c`-`0x8052188`):
+```
+8051bb8: cmp edi, -1        ; edi = deadline (payload[8..12] LE). -1 sentinel = permanent, skip the whole block (-> 0x8051c05)
+8051bf0: cmp edi, [ebp-0x4a4]   ; deadline vs time() (now)
+8051bf6: setb al                ; al = 1 if deadline < now -> "expired"
+```
+`loskiq/MikroTikPatch`'s `license.py` naming (`varb9`/`varb10`/`varb11`=`"Unknown Value"`, `varb12`="Renew Date"/"Deadline" -- the same byte printed under two different words in that one script) directly supports this: it never treats bytes 8-10 as independently meaningful either, it just doesn't name them as part of one field. The `regdate`/`renewdate`-as-two-fields hypothesis proposed this session has no support in either the disassembly or the external tool's source and should be considered ruled out.
+
+**All 5 fields `/system license print` shows for CHR, traced to their source** (license-info function `0x8051a9c`-`0x8052188`, CHR branch taken when `0x804bfb5()` returns true; the SAME function's other branch, taken when it returns false, handles bare-metal ROS -- see below):
+
+| Displayed field | `nv::message` field id | Source |
+|---|---|---|
+| System ID | `0xd` (string) | **Locally computed**, not read from the license payload at all. Built by calling `0x804f858` (the SMBIOS-UUID + MBR system-id formula, `docs/reference/chr-system-id-formula.md`) then formatting via `0x804ffcf`. The payload's own `opaqueId(0-7)` bytes are never read in this function -- for a license to be valid its `opaqueId` presumably must match this locally-computed value, but that comparison (if it exists) happens in a separate, earlier validation function not traced here. |
+| Level | `0xc` (u32) | Payload byte 12, unconditional copy, no lookup/switch (`0x8051baa`). |
+| Deadline at | `0xe` (u32) | `tz_offset + deadline`, inserted only when `deadline != -1` (`0x8051be6`/`0x8051bd9`). |
+| Next Renewal At | `0xf` (u32) | **Not a second license field.** It's `tz_offset + [param2+0x66c]`, a locally-computed, self-rescheduling watchdog-timer target time (traced to its write site at `0x8052e19`, inside a function at `0x8052aa2`): armed only in the final 30 days before `deadline` (`deadline - 2592000 < now`, `0x8052d8d`/`0x8052d98`), then fires every ~1-1.5h with `rand()`-jitter (`0x8052ded`-`0x8052dfa`) to re-check renewal/activation state. Displays "when will this machine next attempt an automatic renewal check", not a calendar date parsed from the license. |
+| Limited Upgrades | `0x12` (bool) | Not fully confirmed (see console-resource findings below), but the strongest candidate is the ONLY other bool insert in this function: `deadline < now` (the same comparison that drives the expired flag), at `0x8051bfd`. |
+
+**Bare-metal ROS's `level` (`nlevel: N`), for comparison**: same function, other branch (`0x8051c93` onward, not a separate function). Payload byte 7 (offset differs from CHR's byte 12 because bare-metal's payload is `software_id(6)+version(1)+level(1)+reserved(8)`, 8 bytes shorter before the level byte):
+```
+80520e6: mov dl, [ebp-0x429]   ; payload[7]
+80520f1: and edi, 0xf          ; level & 0x0F -- no lookup, plain mask
+8052113: call insert<u32_id>   ; message.insert(0x4, level_low_nibble)
+```
+Field `0x4`, unconditional mask-and-copy, no translation table -- confirms why bare-metal `nlevel` has always simply been the raw byte value (0/1/3/4/5/6) while CHR's `level` needs an actual string ("free"/"p1"/"p10"/"p-unlimited") with no confirmed numeric encoding (see below). The high nibble of the same byte goes to field `0x7`, looks like a reserved-flags nibble, zero on real licenses.
+
+**`.npk` package format decoded** (needed to get more binaries than the standalone `keyman` extracts): magic `1ef1d0ba`, followed by a metadata header (package name, version, arch, description, checksum), then at a fixed file offset of **4096 bytes** a SquashFS 4.0 (xz-compressed) image runs to EOF -- `dd skip=4096 | unsquashfs` extracts it directly, no special tooling needed beyond what's already on macOS/Linux. Used to extract `system.npk` from a RouterOS 7.24.2 install ISO, yielding `nova/bin/{keyman,parser,login,sys2}` and `nova/lib/console/1073741824.mem` (a 2MB console-property resource, mmap'd at fixed VA `0x40000000` -- the filename is that address in decimal). `keyman` from this package is identical in relevant logic to the already-analyzed 7.24.1 build.
+
+**Console-resource field-ID bindings** (`1073741824.mem`): the string "Limited Upgrades" (or any of the other 4 CLI display labels, capitalized-with-spaces) does not exist literally in ANY binary examined (`keyman`, `parser`, `login`, `sys2`) -- confirming they're generated at display time from hyphenated property names (`limited-upgrades` -> "Limited Upgrades") stored in the resource file, not from literal label strings. Recovered the per-property record format directly from the resource file's structure (name string, 0-padded, immediately followed by an 8-byte record: `[4-byte handler ptr][pad][1-byte field_id][0x01 0x00]`):
+- **`0x4 <-> nlevel`: confirmed**, name-adjacent (`"nlevel\0\0"` at file offset `0x15a2dc` immediately followed by `field_id=0x04` at `0x15a2e9`).
+- **`0xe <-> deadline-at`: confirmed**, same way (`"deadline-at\0"` at `0x15a3d4` immediately followed by `field_id=0x0e`).
+- **`0xc <-> level`**: NOT name-confirmed -- no standalone `"level\0"` string exists anywhere in the 2MB file (only `nlevel` and unrelated MPLS `lsp-id`-adjacent false positives). `0xc` sits inside a tight, name-less run of records (`0xd,0xc,0x12,0xf`) immediately preceding the confirmed `deadline-at`/`0xe` record -- positionally it's exactly where a CHR `level` property should be, but this is circumstantial, not proven. It's possible CHR's level has no console property name at all (internal-only field).
+- **`0x12 <-> limited-upgrades`**: circumstantial only. `0x12`'s handler pointer (`0x081019a0`) differs from the shared pointer (`0x08101c64`) used by the other integer/timestamp fields in the same cluster, consistent with a boolean-type getter -- but the `"limited-upgrades"` name string itself sits far away (file offset `0x16777`), with no name-adjacency evidence tying the two together.
+- Closing this fully would require disassembling `parser`'s (or `login`'s) actual resource-file-parsing code to recover the authoritative record schema, rather than inferring it positionally -- not done this session, flagged as the natural next step if this thread is picked up again.
+
+**Level byte -> CHR tier name (`free`/`p1`/`p10`/`p-unlimited`) mapping: still not found.** MikroTik's own official docs (manual.mikrotik.com, help.mikrotik.com) confirm CHR shows `level` as a string only, explicitly stating the bare-metal numeric `nlevel` scheme does not apply to CHR. A candidate 3-entry enum table exists in the resource file at offset `0x1d1094` (`0->p-unlimited`, `1->p1`, `2->p10`) but its only back-reference sits next to an unrelated renewal-timing (`immediate`/`after-1min`/`after-1h`) cluster, not next to anything level-related -- not bound to the `level` field, treat as unconfirmed/likely a different enum that happens to reuse those tier-name strings for some other purpose (e.g. a purchase/upgrade-prompt UI element). No external source (official docs, forum posts, the `loskiq/MikroTikPatch` tool) states a numeric byte value for any CHR tier either.
+
+**Files**: this session's disassembly reused `backup/bin/analysis/x86_chr/keyman_x86_7.24.1.disasm.txt`; new extraction artifacts live outside the repo under `/tmp/mikrotik-7.24.2-extracted/` (not committed, scratch only -- re-derivable from a RouterOS install ISO via the `.npk` procedure above if needed again).
+
+**Level value summary (ROS vs CHR), following directly from the above:**
+
+- **Bare-metal ROS `nlevel`**: numeric, `{0, 1, 3, 4, 5, 6}` (2 does not exist) -- well-documented externally, and confirmed above as a direct, untranslated byte read (`payload[7] & 0x0F`, field `0x4`, no lookup table).
+- **CHR `level`**: string-only in every source checked (MikroTik's own official docs never show a numeric alongside it, and explicitly state CHR does not use the `nlevel` numeric scheme) -- 4 known tier names: `free`, `p1`, `p10`, `p-unlimited`. The underlying payload byte (offset 12, field `0xc`) is confirmed to exist and be read by `keyman`, but **its byte-value-to-tier-name mapping is not confirmed by any evidence found this session** -- the one candidate 3-entry enum table in the console resource file (`0->p-unlimited`, `1->p1`, `2->p10`, no `free` entry) could not be bound to the `level` field (see above; its only back-reference sits next to an unrelated renewal-timing cluster). Treat as an open item, not a confirmed mapping.
+
+### 8.43 `parser`'s console-resource loading mechanism confirmed real and deliberate (fixed-address `mmap` keyed by filename, self-validating header) -- but the record-dispatch/name-lookup layer itself not yet reached
+
+Continuing §8.42's last open item (binding field ids `0xc`/`0x12` to console property names `level`/`limited-upgrades` via the resource file's real parsing code, rather than positional inference).
+
+**Confirmed directly from `nova/bin/parser`'s disassembly** (not inferred): `main()` (`0x80d6c58`+) calls `nv::getAllDirs("/nova/lib/console", true)`, `opendir`/`readdir`-loops the results, filters entries by a `.mem` suffix (`strcmp`, `0x80d6d92`-`0x80d6da1`), and converts each entry's numeric filename prefix via `strtoul` (`0x80d6d7f`) into a `u32` used as a literal target address. A loader function at `0x807a57e` then does, per file: `open()` -> `fstat()` -> `mmap(addr=<that number>, length=st_size, PROT_READ, MAP_SHARED|MAP_FIXED, fd, 0)`, with a hard `cmp`-and-presumably-abort check (`0x807a5fd`) that the kernel actually honored the fixed address. This is airtight proof that `1073741824.mem`'s filename **is** the literal virtual address it gets mapped to (`0x40000000`) -- not a naming convention someone guessed at.
+
+**New structural finding**: immediately after a successful mmap, `main()` reads `dword[base+0]` and compares it against a process-global "root" pointer (`0x81066d0`) -- the first-loaded resource file establishes the root, later ones must match or `parser` prints a `"warning, <addr>: <val> != root: <val2>"` diagnostic (`0x80d6ec5`-`0x80d6f1a`). On match, `dword[base+0x1c]` gets pushed into a second global (`0x81066c8`) via a generic vector-push helper (`0x80b0d96`, confirmed reused verbatim elsewhere, so not license-specific). This proves the resource file begins with a real, structured header (offset 0 = root-link, offset +0x1c = a second registered table/pointer) rather than records starting immediately at offset 0 -- consistent with there being an authoritative schema, though this particular header field wasn't traced to being the record table itself.
+
+**Not reached**: `0x81066c8`'s only reads found in `parser` are its own two write sites -- no consumer of it was located, meaning the actual per-record name-lookup/field-id-dispatch logic is reached through further indirection (most plausibly: each record's own handler function pointer, called on demand rather than walked linearly at load time) that wasn't traced this session. `parser`'s full disassembly (~247k lines, saved at `/tmp/parser.disasm` on the working machine, not in-repo) would need deeper tracing of what consumes each record's handler-pointer field to close this. `login` was checked and does not independently implement this logic (no reference to `/nova/lib/console/<addr>.mem` beyond static logo text files) -- all of it lives in `parser`.
+
+**Net effect on §8.42's open items**: `0x4<->nlevel` and `0xe<->deadline-at` remain the only two name-confirmed bindings. `0xc<->level` and `0x12<->limited-upgrades` remain circumstantial/positional only. The mechanism underlying the resource file is now known to be a real, deliberately-designed structure (not an artifact of positional coincidence), which increases confidence that SOME authoritative binding exists to find -- but closing it requires tracing the handler-pointer dispatch layer, not yet done.
+
+### 8.44 Exhaustive byte-diff of a `MikroTikPatch`-style `keyman` against its real stock base (`7.24.1`, not `7.23.2`) finds a second, undocumented change beyond the substituted public key: the online license-server hostname is also redirected to a look-alike domain
+
+Following up on §8.41's public-key extraction from an externally-supplied, already-patched `keyman` binary (outside this repo). That binary is exactly the same file size as this project's own `backup/bin/keyman_x86_7.24.1` reference (55,444 bytes) -- a byte-for-byte `cmp -l` against that reference (not the smaller `7.23.2`, which is a different build and diffs everywhere) found **only 35 differing bytes in the entire file**, in two disjoint clusters:
+
+- **32 bytes at file offset `0x765e-0x76a1`**: the 8 embedded public-key dwords already documented in §8.41 (`271501494893987A0A50D41DFC7500FFD4F7B32F455F2C0E7C7439D3BD7B0876`).
+- **3 bytes at file offset `0xc2fa-0xc2fc`**: the string `licence.mikrotik.com` (stock) changed to `licence.mikrotik.ltd` (patched) -- same length, same surrounding bytes, only the `com`/`ltd` TLD differs. This string sits immediately after an embedded `Content-Type: application/x-www-form-urlencoded\r\n` string, and the binary links `nv::HTTPFetch::post`/`nv::HTTPFetch::appendVar` (a MikroTik-internal HTTP client used for the online license activation/renewal flow already traced in §8.26/§8.27/§8.32).
+
+**Practical implication**: this patched binary isn't only a "verify against a self-controlled key" modification -- if its online-activation code path ever runs, it POSTs form-encoded data (plausibly including hardware-identity/SOFTWARE-ID fields, matching that call chain's known purpose) to `licence.mikrotik.ltd`, a domain not controlled by MikroTik, rather than to the real `licence.mikrotik.com`. This project did not resolve, contact, or otherwise investigate that domain -- the finding is limited to "the hostname embedded in the binary was silently swapped for a look-alike," which is sufficient on its own to treat this specific artifact as untrustworthy for any network-connected use, independent of the licensing question.
+
+**Filesystem/behavior scope, confirmed unchanged from stock by the same exhaustive diff** (i.e. every path below is byte-identical between the stock `7.24.1` and the patched binary -- the patch touches nothing here):
+
+```
+/dev/flash                              hardware-identity read (§8.24-§8.31, §8.39)
+/dev/urandom                            PRNG seed only, see below
+/dev/nvme%d, /dev/xvda, /dev/root-disk  disk-device probing (feeds SOFTWARE ID)
+/nova/etc/license
+/nova/etc/serial
+/var/pckg/%s.key                        package license files
+/sys/class/dmi/id/product_uuid
+/proc/scsi/usb-storage/%u
+```
+
+**`/dev/flash` read detail**: `open("/dev/flash", ...)` followed by one of several `ioctl` calls depending on call site (`0x4601`, `0x80044604`, `0x462b`, confirmed in §8.24/§8.39) -- reads up to 512 bytes of the real RouterBOARD's own board-level identity/serial data out of flash, feeding into the `getHardwareID`/SOFTWARE-ID derivation chain. Meaningful only on real hardware; under QEMU/KVM this path is typically absent or behaves differently (§8.15-§8.18 traces the virtualized fallback).
+
+**`/dev/urandom` read detail, traced this session** (x86, `0x804fdf0-0x804fe4f`, present identically in the *unmodified* stock `7.24.1` -- not part of the patch's 35-byte diff): `open("/dev/urandom", O_RDONLY)` -> `read(fd, buf, 4)` (exactly 4 bytes) -> `close(fd)` -> `gettimeofday(&tv, NULL)` -> `srand(<those 4 bytes> + tv.tv_sec)` -> `rand()`. This is a standard C-library `srand()`/`rand()` seed (4 real-random bytes mixed with the current timestamp), not a cryptographic operation -- consistent with this binary being verify-only (signing would need real entropy; this doesn't sign anything). Plausibly seeds a nonce/request-id used somewhere in the `HTTPFetch` POST flow (§8.44's `licence.mikrotik.ltd` finding), but the consumer of this specific `rand()` value was not traced.
+
+No added/removed imports, no new file paths, no additional code -- the patch is exactly two surgical, same-length byte substitutions (public key, then hostname) inside an otherwise-untouched stock `7.24.1` binary. This is not itself evidence of what `licence.mikrotik.ltd` does when contacted (not tested), only that the substitution exists and is deliberate (matching length, no other bytes disturbed).
+
+### 8.45 `/dev/flash`'s real-hardware read path in x86 `keyman` traced one level deeper -- corrects §8.44's "`ioctl 0x4601` reads up to 512 bytes" to "`0x4601` is a probe, `0x90004602` is the actual data read", and surfaces an unexplained `fopen(path, "--mbr")` fallback call
+
+Continuing §8.44's file-access inventory with a deeper trace of the readMBR-equivalent function (x86, entry `0x8051200`, called from 15+ sites throughout `keyman` -- not yet all enumerated). This corrects an imprecision in this session's own earlier summary of `ioctl 0x4601`.
+
+**Confirmed structure, real-hardware branch** (taken when the `board`-contains-`"qemu"` predicate at `0x804f902` is false -- the QEMU-true branch instead reads from a cached message-bus object via `0x80501bd`, per the existing §5/§8.15-§8.18 flow, and never touches `/dev/flash` at all):
+
+```
+fd = open("/dev/flash", O_RDONLY, 0)          ; 0x80540b9 = "/dev/flash"
+rc = ioctl(fd, 0x4601, NULL)                  ; third arg is NULL, not a buffer --
+                                               ; this is a probe/status call, not a data read
+if (0x100 <= rc <= 0x4000):                   ; range-checked via (rc - 0x100) <= 0x3f00
+    close(fd)
+    buf_len = (rc + 0xf) & ~0xf               ; round up to 16 bytes, alloca'd on stack
+    ioctl(fd, 0x90004602, stack_buf)          ; *** this is the actual data-fetching call ***
+    n = min(returned_size, 0x200)             ; clamped to 512 bytes
+    memcpy(caller_buf, stack_buf, n)          ; rep movsb into the caller-supplied buffer
+else:
+    fh = fopen(path_arg, "--mbr")             ; path_arg is the function's own first parameter,
+                                               ; NOT the literal "/dev/flash" -- and the second
+                                               ; argument really is the literal string "--mbr",
+                                               ; not a real fopen() mode ("r"/"rb"/etc)
+    fread(caller_buf, 512, 1, fh)
+    fclose(fh)
+```
+
+**Correction to §8.44's phrasing**: that section said `ioctl(fd, 0x4601, buf)` "reads up to 512 bytes... into a caller-supplied buffer." That conflated two separate calls. `0x4601`'s third argument is `NULL` -- it cannot be reading into anything. The actual 512-byte(-clamped) read happens via the *second* ioctl, `0x90004602`, called only after `0x4601` succeeds and returns a value in `[0x100, 0x4000]`.
+
+**Not yet explained**: the `fopen(path, "--mbr")` fallback. `fopen`'s second parameter is conventionally a mode string (`"r"`, `"rb"`, ...); `"--mbr"` is not a valid mode and looks instead like a CLI flag. Two explanations, neither confirmed:
+1. This binary's linked `fopen` is genuinely glibc's `fopen`, and passing `"--mbr"` as the mode is either a latent bug in MikroTik's own code (glibc's `fopen` would likely just fail to parse recognized mode characters and behave unpredictably, e.g. defaulting to read-only) that happens not to matter because this branch is rarely/never reached on real hardware.
+2. `open@plt`'s and `fopen@plt`'s underlying implementations for this binary are not plain glibc (the binary is dynamically linked against `/lib/libc.so`, per `file`'s `interpreter` field, but no evidence was gathered this session on whether that's glibc or an embedded/custom libc) -- if this platform's `fopen`-equivalent has different call semantics (e.g. mode selects a data source variant, similar in spirit to `getHardwareID`'s several source paths already documented), `"--mbr"` would make more sense as a genuine argument. Not investigated further this session.
+
+### 8.46 Full inventory of hardware/system data sources `keyman` reads, beyond the already-documented SMBIOS UUID and disk ATA IDENTIFY -- confirms NVMe and USB-storage equivalents of the disk path, and a `/dev/flash`+`/dev/mtdblockN` fallback for flash-only boards
+
+Prompted by the question "does `keyman` read anything else -- other UUID sources, CPU/hardware info, flash files, other MBR offsets, env/proc/sys?" Investigated via `strings -a -t x` on `keyman_x86_7.24.1` to find candidate path/string references, then `r2`'s `axt <addr>` to cross-reference each string to its caller, then manual disassembly reading of each caller. ARM (`keyman_arm_7.24.1`) was checked only at the `strings` level (same strings present) -- not independently re-disassembled function-by-function this session.
+
+**UUID sources**: no new ones found. Only `/sys/class/dmi/id/product_uuid` (already documented, §8.9/§8.10-area and `docs/reference/chr-system-id-formula.md`) -- confirmed via disassembly at `fcn.0804f858`, read via `fopen`+`fscanf`. No `/etc/machine-id`, `board_serial`, `chassis_asset_tag`, `bios_vendor`, or other DMI files referenced anywhere in the string table.
+
+**CPU/hardware info**: no `/proc/cpuinfo`, no CPUID references, no MAC-address strings anywhere in the binary. One relevant symbol found: `getBoardSerialNumber()` is an **imported, dynamically-linked** function (PLT stub, called once from `main` at call site `0x08052002`) -- its implementation lives outside `keyman` (presumably RouterOS's board-support library) and was not traced further.
+
+**Flash storage** (new, confirmed via disassembly): `/dev/flash` (string `0x080540b9`) is opened directly with custom (non-MTD) ioctls in several functions, used as an **alternate identity/MBR source on flash-only devices that have no real disk** -- this is the same `/dev/flash` path detailed in §8.44/§8.45, but this pass additionally confirmed the *selection logic*:
+- `fcn.0804e479` resolves the real block device via `readlink("/dev/root-disk", buf, 127)`; if that fails and `stat("/flash")` succeeds, it falls back to `snprintf("/dev/mtdblock%u", ...)` (string `0x08054019`) -- i.e. CHR/embedded images with no root-disk symlink are addressed via `/dev/mtdblockN` rather than a raw `/dev/mtd*` character device.
+- Two `getenv("board")` checks gate which path is taken: `fcn.0804f902` does `strstr(result, "qemu")` (drives the QEMU-vs-real-hardware branch already known from §8.45); `fcn.08050e01` separately checks whether the first character of `board` is `'7'`, distinguishing RouterBOARD-7xx-series-style boards (flash-only, no disk controller) from others.
+
+**Other disk-bus equivalents of ATA IDENTIFY** (new, confirmed via disassembly):
+- **NVMe**: `fcn.0804fac1` (called from `fcn.080502b6`) opens `/dev/nvme%dn%d` (parsed via `sscanf` on the resolved block device's basename) and issues `NVME_IOCTL_ADMIN_CMD` (`0xc0484e41`, opcode `0x06` = Identify Controller) to extract model/serial -- the NVMe-bus counterpart of the already-documented ATA IDENTIFY source. Confirms the disk-identity formula's inputs are bus-agnostic by design, not ATA-specific.
+- **USB installation media**: in `fcn.08050e01`, `ioctl(fd, 0x5386, ...)` on the resolved device is `SCSI_IOCTL_GET_BUS_NUMBER` -- **corrected in §8.49: it is taken on SUCCESS, not failure**, using the returned `host_no` directly as the exact `%u` in a single `snprintf("/proc/scsi/usb-storage/%u", host_no)` + one `fopen()` (no retry/scan loop). The `/dev/xvda` (Xen virtual disk) `strcmp` is a separate branch leading to the same kind of fallback-success path, not into the usb-storage read itself. See §8.49 for the full mechanism (why this file exists, what populates it, and an open question about whether RouterOS x86 actually ships a live `usb-storage`/legacy-`/proc/scsi` stack).
+- No MBR offsets beyond the already-documented `0x100`-`0x10F` license region were found referenced by any of the traced functions.
+
+**env / proc / sys**: only `getenv("board")` is read (two call sites, described above). No `/proc/cmdline` and no other `/proc`/`/sys` files beyond `product_uuid` and the two disk/flash paths above.
+
+**Not yet traced**: `getBoardSerialNumber()`'s internal implementation (outside this binary); independent per-function disassembly confirmation on ARM (string-level match only).
+
+### 8.47 `keyman` performs zero range/validity enforcement on the license-level nibble (0-15 all reachable and displayed as-is); no numeric-to-tier-name table exists inside the binary for either bare-metal or CHR
+
+Prompted by the question "the level nibble can hold 0-15 -- which values does `keyman` actually use?" Investigated via the pre-existing `keyman_x86_7.24.1.disasm.txt`, spot-checked against a fresh `objdump -d -M intel` of `keyman_x86_7.23.2` (same instructions at equivalent addresses -- not a 7.24.1-only artifact). ARM (`keyman_arm_7.24.1.annotated.asm`) was grepped for the equivalent mask/compare pair but the matching function could not be located in the time available -- **not independently re-confirmed on ARM this session**, though §8.42 already established the bare-metal/CHR branches converge on shared logic.
+
+**No range check exists.** The shared license-info function (`0x8051a9c`-`0x8052188`, §8.42) extracts the level nibble with a bare mask and stores it unconditionally:
+
+```
+80520e6: mov dl, [ebp-0x429]     ; payload byte 7 (bare-metal) / byte 12 region (CHR)
+80520ed: mov edi, edx
+80520f1: and edi, 0xf            ; edi = level, 0-15, no clamp, no cmp-against-max anywhere
+8052113: call nv::message::insert(field 0x4, edi)   ; unconditional -- every one of the 16
+                                                     ; possible values gets stored and displayed
+```
+
+**No value -> name table exists inside `keyman`.** Confirmed two ways: (1) `keyman`'s own string table contains `free` but not `p1`/`p10`/`p-unlimited` -- consistent with §8.42/§8.43's finding that those three names live only in the separate `1073741824.mem` console-resource file, whose binding to field id `0xc` (`level`) remains circumstantial, not proven. (2) The only genuine (non-PLT) jump table in the whole binary, at `0x80531e8`, dispatches on an unrelated config-property command id (bounds-checked `cmp esi,5/ja`), not on the level value -- there is no switch/array-index construct anywhere that keys off the level nibble.
+
+**The only branches on the level value are behavioral, not validating**, and treat every value >1 identically:
+```
+8052132: cmp edi, 0x1
+8052135: ja 0x8052231     ; level > 1: inserts one extra field (0x9, from the next payload byte)
+                          ; -- 2 and 15 take the exact same branch, no distinction
+8052143: test edi, edi
+         je ...           ; level == 0: computes a separate, randomized "uptime-derived" field
+                          ; (0x6) instead -- looks demo/trial-jitter related, unrelated to naming
+```
+
+So functionally `keyman` recognizes 3 *behavioral* buckets (`0`, `1`, `>1`), not a validated enumeration -- every nibble value 0-15 is mechanically reachable and rendered as-is. **The observed real-world set `{0,1,3,4,5,6}` (2 never issued, per `keys.toml`'s corpus) is a property of what MikroTik's signing infrastructure actually signs, not something `keyman`'s disassembly enforces.** Bare-metal and CHR share this exact code path -- the only structural difference (already documented in §8.42) is which payload byte offset feeds into it (7 vs 12), not the validation logic, because there isn't any.
+
+**Not yet resolved**: the CHR numeric level -> tier-name (`free`/`p1`/`p10`/`p-unlimited`) mapping still has no confirmed source anywhere (not in `keyman`, and only circumstantially in the `parser` console-resource file per §8.42/§8.43).
+
+### 8.48 `getBoardSerialNumber()` traced to `libumsg.so` -- an independent `/dev/flash` ioctl primitive, distinct from both `getBoardType()` (§8.29) and `keyman`'s own flash-reading code (§8.44/§8.45); confirmed used by four binaries, not license-specific
+
+Continuing §8.46's "not yet traced" item: `keyman` imports `_Z20getBoardSerialNumberv` (`getBoardSerialNumber()`) from `libumsg.so` rather than implementing it itself. Located the exporting library at `/lib/libumsg.so` in the extracted `routeros-7.24.2.npk` system SquashFS (`nm -D | grep getBoardSerialNumber`), then disassembled the symbol directly (x86 32-bit build, symbol at `0x4d91f`-`0x4d9a8`; PIC base resolved via the `call get_pc_thunk_bx; add ebx,<const>` idiom, GOT base `0x7f000`).
+
+**What it reads**: opens **`/dev/flash`** (string `0x6fde6`) with `O_RDWR` -- *not* `/dev/rb`, which is the entirely separate device `getBoardType()` (§8.29) opens (`0x6fdb5`, confirmed in the same disassembly dump).
+
+```
+0x4d933: lea eax, [ebx-0xf21a]      ; -> "/dev/flash"
+0x4d939: push 0x2                  ; O_RDWR
+0x4d93c: call open@plt
+0x4d944: cmp eax, -1
+0x4d947: jne 0x4d963               ; success -> proceed to ioctl
+                                    ; failure -> perror("open"); return empty string
+```
+
+**Call chain**: does *not* call `getBoardType()` or `readHcfgField()` -- issues its own dedicated ioctl directly. `/dev/flash` is confirmed to be a shared misc character device backing multiple distinct ioctl "commands" all under Linux ioctl type byte `0x46` (`'F'`):
+- `getBoardSerialNumber`: `ioctl(fd, 0x80104608, buf)` = `_IOR('F', 0x08, ...)` (read-only, nr `0x08`)
+- `readHcfgField` (`_Z13readHcfgFieldiPvjb`, `0x4d9ab`, a separate exported function in the same library that also opens `/dev/flash` via the identical string reference): `ioctl(fd, 0xc0044626, ...)` = `_IOWR('F', 0x26, ...)` -- a generic "read hardware-config field by key" accessor
+- For contrast, `getBoardType()` (§8.29) uses the unrelated device `/dev/rb` and `ioctl 0x520f` = `_IO('R', 0x0f)` (no data direction) -- confirms these are two structurally independent hardware-identity primitives in the same library, not layers of the same call.
+
+**Format/transform**: on success, zeroes a 32-byte stack buffer, passes its address as the ioctl output buffer, and after `close(fd)` builds the return value via `std::string::string(const char*)` on that buffer -- i.e. the raw ioctl output is treated as a **NUL-terminated ASCII C-string and copied verbatim**. No BCD decode, no checksum/mixing, no numeric reformatting.
+
+**Fallback**: if `open("/dev/flash", O_RDWR)` fails (e.g. no such device under QEMU/CHR), calls `perror("open")` (message string literally `"open"`, `0x6fdf1` -- `perror` appends `": <strerror>"` itself) and returns the **default-constructed (empty) string `""`**, without attempting any ioctl.
+
+**Other callers** (`grep -rla getBoardSerialNumber` across the whole extracted filesystem, `nm -D` confirms undefined/imported symbol in each): `/nova/bin/keyman` (already known, §8.46), `/nova/bin/figman`, `/nova/bin/moduler`, `/bndl/wifi/nova/bin/ww2` (wifi driver bundle) -- confirms this is a **general board-identity primitive** shared across licensing, module management, and the wifi subsystem, not something `keyman`-specific. Call-site purpose inside `figman`/`moduler`/`ww2` was not traced (import confirmed only).
+
+**Not yet done**: the exact byte layout the `0x80104608` ioctl fills within the 32-byte buffer beyond "a NUL-terminated ASCII string somewhere in it" was not reverse-engineered field-by-field; the kernel module backing `/dev/flash`'s ioctl type `0x46`/nr `0x08` was not located this session (a reasonable next step, analogous to how §8.31 located `flash.ko` for `/dev/rb`'s `"MetaROUTER"` string).
+
+### 8.49 How `/proc/scsi/usb-storage/<N>` (§8.46's USB-install fallback) actually comes into existence -- standard Linux legacy-SCSI-proc mechanism, not RouterOS-specific; also corrects §8.46's branch direction and confirms `keyman` never scans/guesses `<N>`
+
+Follow-up to §8.46's USB-storage fallback item. Points 1-3 below are general mainline Linux kernel behavior (not something reverse-engineered from RouterOS -- stated directly), point 4 is RouterOS-specific verification, point 5 is a correction to §8.46 from direct re-disassembly.
+
+**Mechanism (general Linux)**: `/proc/scsi/usb-storage/<host_no>` is an instance of the legacy `/proc/scsi/<driver_name>/<host_no>` convention (`drivers/scsi/scsi_proc.c`, gated by `CONFIG_SCSI_PROC_FS`). Every SCSI host adapter -- real or virtual -- that calls `scsi_add_host()` gets a `Scsi_Host` struct with a `host_no` assigned in registration order; `scsi_add_host()` internally creates the corresponding `/proc/scsi/<proc_name>/<host_no>` entry. `usb-storage` (`drivers/usb/storage/usb.c`) presents each bound USB mass-storage device as a synthetic SCSI host adapter, which is why USB flash drives enumerate as `/dev/sdX` and get one of these entries. The bind is triggered by USB enumeration matching the device's Mass Storage class interface (`bInterfaceClass=0x08`) against `usb-storage`'s device-ID table -- nothing pre-creates the file at boot; it exists only while a matching device is attached. Its contents (vendor/product/serial) come straight from the USB device's own descriptors (`idVendor`/`idProduct`/`iSerialNumber`), populated by the kernel driver -- not computed by `keyman`.
+
+**RouterOS-specific check**: searched the extracted x86 `routeros-system.squashfs` (kernel `5.6.3-64`). **No `usb-storage.ko` and no SCSI modules at all** (`sd_mod`/`sr_mod`/`scsi_mod`) exist as `.ko` files under `/lib/modules/5.6.3-64/`, and `modules.builtin` is empty/absent so module-vs-builtin status couldn't be confirmed from metadata; a raw `strings` scan of the compressed EFI boot image for `"usb-storage"`/`"/proc/scsi"` came back empty but is inconclusive (compressed image, not decompressed). **Open question, not resolved**: no direct evidence either way that RouterOS x86's running kernel actually ships a live `usb-storage`/legacy-`/proc/scsi` stack -- the absence of any `.ko` for the whole SCSI layer is more consistent with "compiled statically into the kernel" than "feature dropped," but this is not proven.
+
+**Correction to §8.46**: re-disassembled `fcn.08050e01` directly against `keyman_x86_7.24.1` (string `/proc/scsi/usb-storage/%u` at `0x08054142`; not covered by the pre-existing `.disasm.txt` dump, so this required a fresh `r2` pass). §8.46 said the `/proc/scsi/usb-storage/%u` path is taken "if `ioctl(fd, 0x5386, ...)` ... fails" -- **this had the branch direction backwards**. `0x5386` is `SCSI_IOCTL_GET_BUS_NUMBER`, and the code takes the usb-storage path when this ioctl **succeeds**, using the returned `host_no` directly:
+
+```
+ioctl(fd, 0x5386, &var_504h)      ; SCSI_IOCTL_GET_BUS_NUMBER
+if rc == 0:
+    snprintf(buf, "/proc/scsi/usb-storage/%u", var_504h)   ; exact host_no, once
+    fopen(buf, ...)                                         ; single attempt, no retry/scan loop
+else:
+    -> falls into the shared fallback-identity cleanup path
+```
+
+The `/dev/xvda` (Xen virtual disk) `strcmp` check is a separate branch leading to the same kind of fallback-success path -- it does not feed into the usb-storage read. Practical upshot: `keyman` never has to guess or iterate over candidate `<N>` values -- it asks the kernel for the exact SCSI host number directly and reads that one path once.
+
+### 8.50 Kernel module backing `/dev/flash`'s `0x80104608` ioctl located and confirmed at instruction level: `flash.ko` (ARM64/RouterBOARD builds only) -- x86/CHR has no such driver, `/dev/flash` there is userspace-only; also corrects §8.31's passing assumption that `/dev/rb` might live inside `flash.ko`
+
+Resolves §8.48's "not yet done" item. Extracted `routeros-7.24.2-arm64.npk`'s embedded squashfs (found via the `hsqs` magic at file offset `4096`, per §8.42's already-documented `.npk` format) from `/Volumes/未命名/Data/tmp/ros/backup/mikrotik-7.24.2-extracted/mikrotik-7.24.2-arm64.iso`, yielding `flash.ko` at `/lib/modules/5.6.3/misc/flash.ko` (ARM aarch64, not stripped) -- the same path §8.31 previously described from a since-removed mount, now independently re-extracted and confirmed.
+
+**Confirmed at instruction level that this module handles exactly `0x80104608`** (`libumsg.so`'s `getBoardSerialNumber()` ioctl, §8.48). `nm` shows an exported `flash_ioctl` function containing a binary-search-style dispatch over ioctl command values; traced the exact constant-construction chain leading to the matching case:
+
+```
+34dc: mov  w0, #0x463a
+34e0: movk w0, #0x8010, lsl #16    ; w0 = 0x8010463a
+34f0: sub  w0, w0, #0xa            ; w0 = 0x80104630
+3500: sub  w0, w0, #0x28           ; w0 = 0x80104608
+3504: cmp  w20, w0
+3508: b.eq 0x371c                  ; case handler at flash_ioctl+0x304
+```
+
+`strings` additionally confirms the device-registration name `flash` and adjacent exported symbols (`copy_from_flash`, `has_flash_driver`, `flash_get_uid`, `flash_erase`, `flash_driver_ok`, `flash_cmd`) plus a `misc_register` call at `init_module+0x118`, matching §8.31's description of this module unconditionally registering itself at init.
+
+**x86/CHR has no equivalent kernel driver.** Enumerated all 298 `.ko` files in the x86 build (`system-squashfs-extracted/lib/modules/5.6.3-64/`) -- none are flash-related. Decompressed that build's kernel image (xz payload inside `mnt-x86/isolinux/linux`) and confirmed the `/dev/flash` string found there belongs to the RouterOS **installer/setup** userspace program's `.rodata` (adjacent to `"Welcome to MikroTik Router Software installation"`, `"readMBR: could not open %s"`), not a driver registration message. So on x86/CHR, `/dev/flash` access is purely userspace (`libumsg.so`/`keyman`/the installer) -- there is no real flash hardware to back a kernel driver, consistent with §8.15-§8.18.
+
+**Correction to §8.31**: that section's phrasing left open whether `/dev/rb` provisioning might live inside `flash.ko` itself. Confirmed it does not -- `/dev/rb` is backed by a separate module, `rb.ko`, sitting alongside `flash.ko` and `flash-uefi.ko` in the same `misc/` directory. Three distinct misc-device modules, not one multiplexed driver.
+
+### 8.51 How `keyman` parses `/proc/scsi/usb-storage/<N>` after `fopen()` (§8.49's follow-up): `fgets`+`sscanf` on `VendorID:`/`ProductID:`/`Serial Number:` lines -- not the vanilla kernel's `Vendor:`/`Product:` name fields -- plus a silent fallback that degrades to zeroed identity data rather than erroring
+
+Continuing §8.49: traced `fcn.08050e01` (`keyman_x86_7.24.1`, `0x080510aa`-`0x0805118d`) past the point where `fopen("/proc/scsi/usb-storage/%u", "r")` succeeds.
+
+**Parsing mechanism**: a `fgets`+`sscanf` loop, not one combined `fscanf` on the stream:
+```
+0x080510c6: fgets(line_buf, 0x80, fp)             ; up to 128 bytes/line
+0x080510e0: sscanf(line_buf, "Serial Number: %80s", &var_210h)
+0x080510f9: sscanf(line_buf, " VendorID: %x",       &var_218h)
+0x0805110c: sscanf(line_buf, " ProductID: %x",      &var_21ch)
+```
+Each `sscanf`'s return value (`dec eax; je 0x80510b8`) gates whether to loop back for the next line immediately or fall through to try the remaining format(s) against the same line. Loop exits when `fgets` hits EOF (`0x080510d0` -> `0x08051129`).
+
+**Discrepancy vs. vanilla mainline kernel text -- now confirmed real, not just recalled.** A real captured `cat /proc/scsi/usb-storage/1` (Alpine Linux, standard kernel `usb-storage` driver, screenshot supplied by the user) reads:
+
+```
+   Host scsi1: usb-storage
+       Vendor: RouterOS-SCSI
+      Product: RouterOS-SCSI
+Serial Number: 00000000000002142239
+     Protocol: Transparent SCSI
+    Transport: Bulk
+       Quirks:
+```
+
+This is exactly the classic `Vendor:`/`Product:`/`Serial Number:` name-string format -- **no `VendorID:`/`ProductID:` hex lines exist anywhere in real `usb-storage` output**. This confirms (not just "recalled from kernel-source knowledge") that `keyman`'s `" VendorID: %x"` / `" ProductID: %x"` sscanf patterns can never match on any standard Linux kernel's `usb-storage` proc output -- only the `"Serial Number: %80s"` pattern ever succeeds. **Consequence for §8.51's post-extraction step**: on real hardware/VMs, `var_218h` (vendor) and `var_21ch` (product) are left as whatever uninitialized stack garbage was already sitting in those slots when the function's prologue ran -- they are never legitimately populated from `/proc`, yet the code unconditionally folds them into the same XOR-mix/`fcn.0804ca66` identity step as `serial`. Only `serial` is genuinely `/proc`-derived; `vendor`/`product` are effectively noise inputs to the identity formula on this path. Whether RouterOS's own kernel differs from this Alpine Linux capture wasn't separately verified, but there is now no plausible mainstream `usb-storage` implementation that would emit `VendorID:`/`ProductID:` hex lines, so this is treated as settled rather than an open discrepancy.
+
+(A second, unrelated string `"Serial Number: %19s"` at `0x0805415c` exists elsewhere in the binary but is not referenced by this function -- belongs to the already-documented ATA-IDENTIFY serial path, not this one.)
+
+**Post-extraction transformation**: `Serial Number` is captured via `%80s` (whitespace-delimited by `sscanf` itself, no separate trim call); `VendorID`/`ProductID` are captured directly as 4-byte integers via `%x` (no string handling). After the loop, execution unconditionally falls into `0x08051129`: `close(fp)`, zero-fills a 6-byte field, then a 20-byte XOR-mixing loop (`0x0805114d`-`0x0805115f`) folds the captured fields together, followed by a call to `fcn.0804ca66` (`edx=0x5e`) -- likely the same kind of "identity mixing" step already documented for the ATA-IDENTIFY path, but `fcn.0804ca66`'s exact semantics and buffer layout were **not** re-derived this session (out of scope; would need a dedicated follow-up).
+
+**Fallback/error handling**: none, explicitly. There is no "label not found" error path -- a line that matches none of the three formats just falls through to loop for the next line, and reaching EOF (or `fopen` failing per §8.46/§8.49) leads unconditionally to the same cleanup/mixing code using whatever partial (possibly all-zero, if nothing matched) data happened to land in the three capture variables. No error message, no early exit -- a corrupted or differently-formatted `/proc` file silently degrades to zeroed/garbage identity input rather than aborting.
+
+### 8.52 `/system license print`'s `features` field resolved: it is the HIGH nibble of the same license-level byte already documented for `nlevel` (§8.42/§8.47), not a separate payload field -- plus one layer deeper into `parser`'s handler-pointer indirection for `level`'s still-unresolved string mapping
+
+Prompted by a deep-dive request into `/system license print`'s `features` and `level` fields specifically. Used the extracted `keyman_x86_7.24.2` / `parser_x86_7.24.2` / `console-resource_7.24.2.mem` (same file previously named `1073741824.mem` in §8.42/§8.43, mmap'd at the same fixed VA `0x40000000` -- just renamed by decimal address in this newer extraction; addresses in `keyman` are identical to the already-documented `7.24.1` build, confirming this isn't a version artifact).
+
+**`features` -- resolved.** It is *not* a separate payload byte. It is the **high nibble of the exact same license-level byte** §8.42/§8.47 already documented as holding `nlevel` in its low nibble (`payload[7]` bare-metal / the CHR-equivalent offset). Confirmed in the shared license-info function (`0x8051a9c`-`0x8052188`):
+
+```
+80520e6: mov dl, [ebp-0x429]     ; the level byte
+80520ed: mov edi, edx
+80520f1: and edi, 0xf            ; low nibble  -> nlevel, field 0x4 (§8.47)
+80520fa: shr al, 0x4             ; high nibble
+8052100: movzx esi, al
+805210a: shl esi, 0x4            ; reconstructed into bits 4-7
+8052113: call nv::message::insert(field 0x4, edi)
+805211b: and esi, 0xffffff7f     ; bit 0x80 explicitly forced off
+805212a: call nv::message::insert(field 0x7, esi)    ; <-- features
+```
+
+Confirmed via direct name-adjacency in `console-resource_7.24.2.mem` (same `[name][handler][field_id]` record-recovery method as §8.42):
+```
+"nlevel\0\0"    -> handler=0x08101c64  field_id=0x04   (matches §8.42)
+"features\0\0\0\0" -> handler=0x08101c64  field_id=0x07   (NEW)
+```
+`features` shares the *identical* generic handler pointer with `nlevel` -- it's a plain integer/bitmask getter, not specially typed. This explains why the CLI's `features` line is normally blank on real licenses: it's a genuine 3-bit flags nibble (bit `0x80` explicitly masked off before storing) that is simply zero in virtually all real-world signed licenses, not a display artifact of a different subsystem. Both bare-metal and CHR go through this same shared function, so the binding applies to both.
+
+**Ruled out as a false lead**: a `[ptr,val,0xffff]`-shaped table sitting immediately after the `features` record (offset `0x15a300`, pointing at strings `"AP"`(1)/`"synchronous"`(2)/`"radiolan"`(4)) initially looked like a candidate bitmask-name table for `features` -- these are wireless-interface terms, unrelated to licensing, almost certainly coincidental adjacency in the resource file. Same category of false lead as §8.42's ruled-out `p1`/`p10`/`p-unlimited` candidate table.
+
+**`level` string mapping -- still unresolved, pushed one layer deeper.** §8.43 had identified each console-resource record's "handler pointer" but not traced what it points to. This session resolved that: the handler pointer (e.g. `0x08101c64`) is itself an address inside `parser`'s `.rodata` (`0x080f6000`-`0x08102458`), not a function pointer directly -- dereferencing it yields the *actual* code pointer in `.text` (e.g. `[0x08101c64] = 0x08056910`). New data point: field `0xc`'s (the circumstantial "level" candidate) own handler was recovered for the first time and turns out to be the *same* `0x08101c64` shared scalar-getter used by `nlevel`/`features`/`deadline-at` -- unlike field `0x12` ("limited-upgrades" candidate), which has a visibly distinct handler (`0x081019a0`, consistent with a boolean-type getter). This is mild circumstantial evidence *against* `0xc` needing (or having) a distinguishable string-lookup accessor at this layer -- but not conclusive, since a raw-enum-ordinal getter could still feed a separate, not-yet-located name-lookup stage elsewhere. The actual dispatch/lookup code consuming `parser`'s registered-table global (`0x81066c8`, per §8.43) was not reached -- would require full `r2` xref-tracing of `parser`'s `.text` (`0x080542d0`-`0x080f50d9`), not completed this session. Recommended concrete next step if resumed: `r2`'s `axt` on `0x08056910`/`0x08056914` and on `0x81066c8`.
+
+**Net status on `level`**: unchanged from §8.42/§8.43/§8.47 -- bare-metal `nlevel` is a confirmed raw untranslated nibble; CHR's `free`/`p1`/`p10`/`p-unlimited` string mapping remains unconfirmed anywhere in `keyman` or (now) one layer into `parser`'s handler indirection; field `0xc`'s binding to console property `level` remains circumstantial, with one new mildly-negative data point.
+
+### 8.53 CHR's `level` enum choice-list located: a dedicated `"level"`-named record in `console-resource_7.24.2.mem` holds exactly the four known strings (`free`/`p-unlimited`/`p1`/`p10`) with an explicit end-of-list sentinel -- resolving 3 sessions' worth of "where do these strings live"; the numeric-value-to-string dispatch code itself still not reached
+
+Direct continuation of §8.42/§8.43/§8.52's unresolved `level` string-mapping thread. Files: `parser_x86_7.24.2` (ELF32 x86, stripped, baddr `0x8048000`) and `console-resource_7.24.2.mem` (same file as prior sessions' `1073741824.mem`, mmap'd at `0x40000000`) -- both at `/private/tmp/mikrotik-7.24.2-extracted/`.
+
+**Tooling pitfall worth flagging for future sessions**: `r2 -q -c '...' -- parser_x86_7.24.2` (with the `--` separator) silently fails to open the target file while still accepting `px`/`pdf` against an empty/unmapped buffer, returning all-`0xff` reads that *look like plausible disassembly* rather than erroring. Dropping `--` opens the file correctly. Any prior "not found" result obtained via the `--` form should be treated as suspect and re-run.
+
+**Tier-name strings located** -- in `console-resource_7.24.2.mem` itself (not in `parser`, not in `keyman` -- confirming §8.42/§8.43's search of those two binaries was right to come up empty):
+```
+file offset 0x105d74  (VA 0x40105d74)  "free"
+file offset 0x1d10bc  (VA 0x401d10bc)  "p-unlimited"
+file offset 0x1d10c8  (VA 0x401d10c8)  "p1"
+file offset 0x1d10cb  (VA 0x401d10cb)  "p10"
+```
+
+**A dedicated `"level"` property record found** at file offset `0x1c4930`-`0x1c49bf` (VA `0x401c4930`-`0x401c49bf`), distinct from the already-documented `nlevel` record. Decoded field-by-field (each is a VA resolved to its pointee):
+```
+0x1c4944 -> 0x080ffe78   4-entry function-pointer array INSIDE parser:
+                           0x0805693c  bare `ret` (stub/unused slot)
+                           0x08056f70  thunk -> free() (destructor slot)
+                           0x08079428  builds the string "see documentation" (validation/error slot for rejected enum input)
+                           0x0809db10  generic enum-type descriptor/help-text formatter (761 instructions, 25 xrefs --
+                                       shared by EVERY enum-typed console property, not level-specific; this is the
+                                       "vtable" for the enum datatype itself, not a level-only render routine)
+0x1c4950 -> "level"        (the record's own name)
+0x1c4960 -> "free"
+0x1c4968 -> "p-unlimited"
+0x1c4970 -> "p1"
+0x1c4978 -> "p10"
+0x1c497c -> "-"            (sentinel/terminator string immediately after the 4 real choices)
+0x1c4980 -> 0x00000002     (small integer immediately following the terminator -- plausibly a default-choice index, unconfirmed)
+0x1c49b4: ff ff ff ff  ff ff ff ff  ff ff ff ff    <- explicit end-of-list marker
+```
+This is the **enum choice-list for the CLI `level` property**: exactly the four strings CHR is known to display, nothing else, terminated by the `0xffffffff` marker -- resolving where these strings live, something 3 prior sessions searching `keyman` and `parser`'s own `.rodata` for literal string hits could not find (they live in the *data* file, `console-resource_7.24.2.mem`, not in either binary's own string table).
+
+**Numeric value -> string mapping: interpreted, not runtime-confirmed.** No explicit `{integer, string}` pair structure was found -- each 8-byte slot's leading "value" field reads `0x00000000` for `free`/`p-unlimited`/`p1`, and the odd `0x40133ab8`/`0x00000002` pair following `p10` doesn't cleanly fit a per-choice value field either. The structure reads as a flat, index-ordered pointer list rather than a keyed table, meaning the mapping is most likely **by list position** -- `0=free, 1=p-unlimited, 2=p1, 3=p10` -- consistent with CHR's known historical tier rollout order (free/unlimited existed first, p1/p10 metered tiers added later). This ordering is an *inference from list layout*, not confirmed by locating and disassembling the actual comparison/dispatch code that reads the raw `level` byte and indexes into this list.
+
+**Still not reached**: `fcn.0809db10` is the generic enum-type describer shared by all enum properties, not a level-specific getter -- it wasn't the value-comparison code being sought. `axt` on `parser`'s registered-table global (`0x81066c8`) and on the two previously-resolved handler code pointers (`0x08056910`/`0x08056914`) still returns **zero cross-references** after `aaa` analysis -- r2's default analysis cannot resolve whatever computed/indirect addressing consumes them. Recommended next step if resumed: try r2's deeper `aaaa` analysis pass, or manually trace the (unidentified) caller that builds the property-descriptor struct's type-tag fields (offsets `0x9c`/`0x98`/`0xa6` relative to some base, per this session's partial struct-layout notes) specifically for the `level` record, to find the smaller value-comparison loop that indexes into the choice-list above.
+
+### 8.54 §8.51's "vendor/product garbage" question fully resolved: they are NOT stack garbage -- explicitly zero-initialized constants, and the downstream hash is confirmed standard CRC32 -- so the USB-boot identity path is fully deterministic, matching the user's real-world observation that Software ID is stable after writing RouterOS to a USB drive
+
+Direct follow-up to §8.51's open question ("does uninitialized garbage in the vendor/product slots reach the final identity computation?"). Traced with `r2` disassembly cross-validated against a Ghidra decompile (`pdg`) of `fcn.08050e01` and `fcn.0804ca66` in `keyman_x86_7.24.1` -- the decompiler cross-check caught one real misread in manual disassembly, corrected below.
+
+**Not garbage -- explicit constants.** The `/proc/scsi/usb-storage` fallback is only entered after a direct ATA-IDENTIFY `ioctl(fd, 0x30d, ...)` fails. At branch entry (`0x08050fd8`): `var_218h` ("VendorID" slot) is set to the literal constant `0` (`0x08050fef`), and a 127-dword (508-byte) `rep stosd` zero-fill (`0x08050fda`-`0x08050fff`, using `esi=0` set earlier at `0x08050f11`) covers the entire region from the Product-ID slot through the serial buffer, the XOR-mix region, and `var_1f0h` -- all **before** the `fopen`/`fgets`/`sscanf` chain runs. Every byte that can reach the final hash starts from a known compile-time-determined value, not leftover stack state.
+
+**Correction to §8.51's variable naming**: the real "ProductID" sscanf target is `var_214h` (confirmed via `edi`'s last assignment at `0x08051002`, and independently via Ghidra rendering the call literally as `sscanf(..., " ProductID: %x", &var_214h, ...)`), not `var_21ch` as previously assumed. `var_21ch` is actually reused as an unrelated ioctl scratch buffer (`ioctl(fd, 799, &var_21ch, ...)`, a SCSI-GET-IDLUN-style call) that sits outside the region later hashed -- its contents never reach the identity computation regardless of value.
+
+**XOR-mix loop clarified**: `0x0805114d`-`0x0805115f` XORs a 20-byte ASCII-hex encoding of 10 bytes taken from the function's own `param_2+0x100` (a caller-supplied identity buffer, not local state) into `var_204h`-`var_1f1h`. Since that target was already zero-filled, the XOR-against-zero is simply a copy. This loop does not touch the Vendor/Product slots at all (they sit 4-8 bytes lower in the frame, outside the XOR's range).
+
+**`fcn.0804ca66` confirmed as standard CRC32**: table-driven, reflected polynomial `0xEDB88320`, lazily-initialized 256-entry table, `crc=0xFFFFFFFF` seed, caller applies the final `~crc` itself (`not eax` right after the call) -- the classic zlib/PKZIP split-CRC32 idiom. Call site: `crc32(buf=&var_218h, len=94)` -- the 94-byte input spans VendorID(4B, always `0`) + ProductID(4B, always `0`) + the Serial-Number text buffer + the ASCII-hex identity copy + zero-padding, all deterministic except the genuinely-read Serial Number string.
+
+**Resolved answer**: uninitialized garbage was never a real risk on this path -- Vendor/Product are hardcoded zero constants, not stack leftovers. **The USB-boot SOFTWARE-ID-relevant CRC32 input is fully deterministic and reproducible run-to-run**: two zero constants, the real per-device Serial Number read from `/proc/scsi/usb-storage/<N>`, a deterministic ASCII-hex encoding of caller-supplied identity bytes, and deterministic zero-padding. This directly matches the project's own real-world observation that a RouterOS install's Software ID remains stable after being written to a USB drive -- there is no non-reproducibility risk in this code path for the collision-search tooling.
+
+### 8.55 §8.54's "identity data ASCII-hex copy" confirmed to be the exact same MBR Identity-seed bytes documented in §2 -- the USB-storage-boot fallback shares the standard MBR identity(10B) input, only substituting the *serial number* source
+
+Direct follow-up to §8.54 ("a deterministic ASCII-hex encoding of 10 bytes taken from `param_2+0x100`, a caller-supplied identity buffer") -- traced where `param_2` itself comes from.
+
+**Call chain, `keyman_x86_7.24.1`**: `fcn.08050e01` has exactly two call sites. The relevant one: `main()` calls `fcn.08051200` (fills a local buffer `ptr`) at `0x0805394f`, then passes that *same* `&ptr` address as `edx` into `fcn.0805118e` at `0x08053968`, which is a pure pass-through wrapper (`param_2` untouched between its own entry and its call to `fcn.08050e01` at `0x080511ac`).
+
+**`fcn.08051200` is RouterOS's own `readMBR()`** -- self-identified via its own unstripped error strings (`"readMBR: could not open %s: %d\n"`, `"readMBR: could not read %s: %d\n"`). Every internal branch (the `/dev/flash` ioctl path documented in §8.44/§8.45, a plain `fread` fallback, and a message-bus path via `fcn.0804f9a0`) converges on writing exactly **512 bytes** (`0x200`, matching `0x80` dwords in the `rep movsd`/`rep stosd` variants) into the caller-supplied buffer -- i.e. `param_2` is confirmed to be the full raw MBR/boot-sector image, not some smaller ad-hoc structure.
+
+**Byte-range match**: since `param_2` is the 512-byte MBR buffer, `param_2+0x100` is literally MBR file offset `0x100`. The 10 bytes XORed in §8.54's mix loop are `mbr[0x100:0x10A]` -- **exactly** the "Identity seed" field from §2's table (MBR offset `0x100`-`0x109`, 10 bytes), with no overlap into the license marker (`0x10A`-`0x10B`) or the reserved/boot-counter field (`0x10C`-`0x10F`).
+
+**Conclusion**: the USB-storage-boot fallback path (§8.51/§8.54) does not use a separate or different identity source -- it reuses the exact same 10-byte MBR Identity-seed that the standard ATA-IDENTIFY-based SOFTWARE ID path uses, read once via the same `readMBR()` call in `main()` before either branch runs. The *only* thing that differs between the ATA-IDENTIFY path and the USB-storage-proc fallback is which **serial number** string gets folded into the final CRC32 alongside this identity data -- the identity/marker input itself is shared and unaffected by which disk-detection branch executes.
+
+**Caveat noted, not further investigated**: `fcn.08050e01`'s *other* call site (`0x080521ad`, reached from tail code just past §8.52's shared license-info function) explicitly zeroes `edx` (`xor edx,edx` at `0x0805218f`) before calling -- i.e. a second, unrelated invocation with `param_2=NULL`, not part of this identity chain. Its purpose wasn't investigated this session.
+
+### 8.56 `level`'s dispatch trace continued -- `fcn.0809db10` (previously thought a generic enum-display formatter) is actually the CLI `set`/input-*validation* path, not `print`/display; the `print` (numeric->string) path itself is still unlocated
+
+Continuing §8.53's open thread with `r2`'s deeper `aaaa` analysis pass (plain `aaa` had returned zero xrefs for the relevant addresses).
+
+**`aaaa` resolves the registered-table global, but not the level-specific handlers.** Re-running `axt 0x81066c8` under `aaaa` (not just `aaa`) now finds 4 real xrefs (`fcn.0809197f`, two in `main`, one in `entry.init0`). `axt` on `0x08056910`/`0x08056914` (the resolved handler code pointers) and on the level record's own address (`0x401c4930`) still returns **zero xrefs even under `aaaa`** -- this closes off that specific lead as genuinely unreachable by static analysis, not just untried: those addresses are populated through fully computed/indirect addressing at `.mem`-file-load time, invisible to disassembly-based xref tracing.
+
+**Scope correction: `fcn.0809db10` is a value-assignment/*validation* dispatcher, not a display formatter.** Full disassembly (761 instructions) shows it reads a type-tag byte from a value-container object (`[edx+0x9c]`), branches on tag ∈ {8,9,10,11}, and on failure builds `"expected <type> value"` / `"missing value for <name>"` error messages via `fcn.0805ea63`+`fcn.08061304`. This is CLI **`set`-command input validation** (e.g. rejecting `console set level=bogus`), not the `print` rendering path that was actually being sought -- an important scope correction from §8.53's characterization of it as a generic enum "describer."
+
+**Traced the enum (tag `0xb`) branch to the bottom of the validation chain**: `fcn.0809db10` (tag `0xb`) -> `fcn.0807d530` (tail-call) -> `fcn.0807ccdc` -> `fcn.0807cb0e` (461 instructions, the real workhorse) -- reads a `[begin,end,cap]` vector triple at `self+0x80/0x84/0x88` (a `std::vector`-style runtime choice-list, i.e. THIS is where the `free`/`p-unlimited`/`p1`/`p10` list from §8.53 would be walked at `set`-time), tokenizes the raw CLI input text via a generic lexer (`fcn.0807c20e`), then string-compares against the choice-list entries via `fcn.0807c7f2`/`fcn.0807b5ce`.
+
+**The ~25 callers of `fcn.0809db10` are structurally near-identical generic wrappers -- no level-specific x86 code exists at this layer.** Disassembled 20 of them; all share an identical `(arg_8h, arg_ch)` signature and shape (check a type-tag, then either delegate to `fcn.0809db10` with a per-call metadata-struct pointer in `esi`, or take a shortcut copying a value from `[esi+0x10]`). None reference `0x401c4930`/`0x080ffe78`/the choice-string VAs as compiled-in literals -- the level-vs-other-enum distinction is carried entirely as **runtime data** (the `esi` metadata pointer), not as per-property compiled code. This confirms §8.53's alternative hypothesis: there is likely no dedicated "level" x86 function to find at this layer -- it's genuinely one generic mechanism parameterized by data.
+
+**Net status, unresolved**: the traced chain (`0809db10`->`0807d530`->`0807ccdc`->`0807cb0e`->`0807c20e`) is the **`set`/validate** path (string -> matched choice index, triggered by e.g. `console set level=p1`) -- confirmed, but it is a *different direction* than what's needed for `/system license print`'s **display** path (numeric level byte -> displayed string). Whether `print` reuses this same choice-vector-walking machinery (just to look up a string by index instead of validating a string against it) or is an entirely separate, still-undisassembled function was not determined this session. Concrete next step: locate `parser`'s `print`-command handler specifically and check whether it also funnels through `fcn.0807cb0e`'s choice-vector, or whether display formatting lives elsewhere entirely.
+
+### 8.57 CORRECTION to §8.51/§8.54: RouterOS's OWN kernel patches `usb-storage` to add `VendorID:`/`ProductID:` lines -- `keyman`'s parsing of them is NOT dead code, confirmed via MikroTik's own GPL source dump
+
+**This overturns §8.51's "confirmed dead code" conclusion and §8.54's characterization of Vendor/Product as "effectively noise inputs."** Both were based on a real `/proc/scsi/usb-storage/<N>` capture from Alpine Linux (vanilla kernel) showing no `VendorID:`/`ProductID:` lines -- reasonable evidence at the time, but Alpine's vanilla kernel is not representative of RouterOS's own, independently-patched kernel.
+
+**Source-level proof**: `https://github.com/tikoci/mikrotik-gpl/tree/main/2025-03-19` (an unofficial but complete mirror of MikroTik's GPL-obligated kernel source drops) contains a full `linux-5.6.3` tree plus a 754,636-line monolithic patch (`linux-5.6.3.patch`) capturing every MikroTik modification against vanilla upstream. This matches RouterOS's confirmed shipped kernel version `5.6.3-64` on the full major.minor.patch (the `-64` suffix is MikroTik's own build counter, not a different kernel revision).
+
+The patch (lines 693831-693839) modifies `drivers/usb/storage/scsiglue.c`'s `show_info()` function -- the exact callback (registered at line 604 of the same file) that generates `/proc/scsi/usb-storage/<N>`'s content:
+
+```diff
+     seq_printf(m, "     Protocol: %s\n", us->protocol_name);
+     seq_printf(m, "    Transport: %s\n", us->transport_name);
+
++    seq_printf(m, "     VendorID: %04x\n", us->pusb_dev->descriptor.idVendor);
++    seq_printf(m, "     ProductID: %04x\n", us->pusb_dev->descriptor.idProduct);
++
+     /* show the device flags */
+     seq_printf(m, "       Quirks:");
+```
+
+This is inserted right after the `Transport:` line, in the exact `"     VendorID: %04x\n"` / `"     ProductID: %04x\n"` text format `keyman` scans for via `" VendorID: %x"` / `" ProductID: %x"` (§8.51). Grepping the unpatched vanilla tree at `2025-03-19/linux-5.6.3/drivers/usb/storage/` confirms no `VendorID`/`ProductID` string literal exists anywhere before this patch -- it's a genuine MikroTik-authored addition, not an upstream feature Alpine's kernel happened to lack for unrelated reasons.
+
+**Practical consequence, corrected from §8.54**: on real RouterOS (not the Alpine capture used for verification), booting from USB-attached storage DOES exercise the `VendorID`/`ProductID` sscanf paths successfully -- `var_218h`/`var_214h` get overwritten with the real USB device's `idVendor`/`idProduct` (as 4-byte integers parsed from the `%04x` hex text) rather than retaining their zero-initialized default. This means, contrary to §8.54's conclusion, **VID/PID DO reach the final CRC32 input on real RouterOS hardware/VMs when booting from USB storage** -- they are a live, reachable, controllable input, not dead code or inert constants. Anyone programming a USB drive's VID/PID (e.g. via a flash mass-production tool) for identity-collision purposes on a USB-boot RouterOS install needs to account for this: the CRC32 input becomes `idVendor(4B, real) + idProduct(4B, real) + Serial Number text + ASCII-hex(MBR identity[0:10]) + zero-padding`, not the all-zero-VID/PID version previously documented.
+
+**Caveat**: this is a source-code-level proof from a third-party GPL mirror, not a live capture from an actual RouterOS `/proc/scsi/usb-storage/<N>` file -- treated as very high confidence (kernel version match is exact, and the patch is unambiguous), but a live RouterOS capture (e.g. via the `init=/bin/sh` boot-parameter technique) would be the final empirical confirmation if ever needed.
+
+### 8.58 No truncation/padding of the captured Serial Number, and no bounds check on its destination -- confirmed real serials ≥12 characters (including the actual documented example) overflow into and XOR-contaminate the identity-copy region, correcting part of §8.54's "clean copy" claim
+
+Precise byte-level re-verification of `fcn.08050e01`'s stack layout (`objdump -d -M intel` cross-checked against `r2`'s `pdf`), prompted by the question of whether the captured Serial Number is truncated or padded to a fixed width before entering the CRC32 input.
+
+**Exact offsets confirmed**: VendorID `ebp-0x218` (4B), ProductID `ebp-0x214` (4B), Serial-Number `%80s` destination `ebp-0x210`, ASCII-hex identity XOR-copy destination `ebp-0x204` (20B, `ebp-0x204`..`ebp-0x1f0`). The gap between the Serial-Number destination and the identity-copy region is genuinely only **12 bytes** (`0x210-0x204`) -- not a mis-attributed offset, confirmed via full disassembly re-trace.
+
+**No truncation, no length check, no padding anywhere in the function.** `sscanf(..., "Serial Number: %80s", ...)` bounds only how many non-whitespace *input* characters get consumed (up to 80) -- it does not know or respect the true 12-byte destination size. There is no `strlen`/bounds-check/truncation loop touching this buffer anywhere between the `fgets` call and the CRC32 call. This is a genuine unguarded stack write, though bounded in severity: `fgets` itself caps each line at 128 bytes total, so the worst-case overflow (~114 captured characters) still lands well inside the same pre-zeroed 508-byte scratch region (`ebp-0x214`..`ebp-0x18`) -- it cannot reach saved registers, saved `ebp`, or the return address (which sit 500+ bytes further up the frame). A real bug, but confined to corrupting adjacent locals within the same function, not a stack-smashing vector.
+
+**The real captured 20-character serial (`00000000000002142239`, §8.51's addendum) DOES overflow the 12-byte slot.** `sscanf` writes 21 bytes (20 digits + NUL) starting at `ebp-0x210`, spilling 9 bytes past the slot's end into the identity-copy region (`ebp-0x204` onward) -- **before** the XOR-mix loop runs.
+
+**Correction to §8.54**: that section's claim "the XOR-against-zero is simply a copy" assumed the identity-copy region was still all-zero when the XOR-mix loop ran. This is only true for serials ≤11 characters. For the actual documented 20-character example, the region is *not* clean going in -- roughly the first 8-9 of its 20 bytes already hold leftover serial-digit/NUL bytes from the overflow, so the XOR-mix loop's `dest[i] ^= mbr[0x100+i]` produces `serial_byte XOR mbr_identity_byte` for those positions, not the pure MBR identity byte alone. The remaining ~11-12 bytes of the region are unaffected (genuinely zero going in, so still a clean copy of the corresponding MBR identity bytes there).
+
+**Net effect on the project's practical conclusions**: this does NOT undermine §8.54's ultimate determinism conclusion -- the contamination is itself fully deterministic (same device, same serial string, same overflow, same result every run), so Software-ID stability across reboots (matching the user's real-world observation) still holds. What changes is the *exact formula*: for any USB-boot serial of realistic length (the documented 20-character example, and likely most real disk/USB serials), the CRC32 input is **not** cleanly separable into "Serial text" + "pure MBR identity(10B) copy" -- the two regions are XORed together over the serial's tail characters. Anyone attempting to hand-reproduce this CRC32 for collision-search purposes must replicate the overflow/XOR interaction byte-for-byte (as a function of exact serial string length) rather than treating Serial and identity as two independently concatenable fields.
+
+**Confirmed 94-byte CRC32 input layout** (`buf=ebp-0x218`, `len=0x5e`):
+```
+ebp-0x218 (4B)   VendorID   -- real idVendor per §8.57 (was believed constant-0, corrected)
+ebp-0x214 (4B)   ProductID  -- real idProduct per §8.57 (was believed constant-0, corrected)
+ebp-0x210 (12B)  "Serial-Number slot" (nominal capacity only -- unguarded, overflows for serials >=12 chars)
+ebp-0x204 (20B)  ASCII-hex XOR-copy of mbr[0x100:0x10A] -- contaminated by serial overflow for long serials
+ebp-0x1f0 (6B)   explicit zero (rep stosb)
+ebp-0x1ea (48B)  remainder of the original 508-byte zero-fill, untouched
+                 total: 4+4+12+20+6+48 = 94 bytes ✓
+```
+
+### 8.59 Real-hardware test-rig notes: QEMU's `usb-storage` device does NOT support overriding `idVendor`/`idProduct` (those are `usb-host`-only properties), and its compile-time-hardcoded default is `idVendor=0x46f4` / `idProduct=0x0001`
+
+While setting up a PVE test VM (341) to empirically validate §8.51-§8.58's findings by simulating a USB flash drive with controlled `VendorID`/`ProductID`/`Serial Number` values (targeting a real mass-production-tool readout: VID `0x0951`, PID `0x1666`, Serial `00000000000002142239`), discovered a QEMU device-model limitation worth recording for anyone reproducing this test setup.
+
+**`-device usb-storage,...,vendorid=...,productid=...` fails to start.** Confirmed via an actual `qm start` attempt on PVE (`pve-qemu-kvm 11.0.3-3`), exact error:
+```
+kvm: -device usb-storage,...: Property 'usb-storage.productid' not found
+start failed: QEMU exited with code 1
+```
+`vendorid`/`productid` are properties of `usb-host` (physical USB device passthrough by descriptor match), not of `usb-storage` (the emulated mass-storage backend that takes an arbitrary raw disk image via `-drive`). The two device models are not interchangeable -- `usb-host` can't be backed by a custom raw image the way `usb-storage` can, since it passes through a real physical device. `serial=` IS a valid `usb-storage` property and works as expected; only `vendorid`/`productid` are rejected.
+
+**Default `idVendor`/`idProduct` when unspecified**: confirmed via QEMU's own upstream source (`https://github.com/qemu/qemu/blob/v11.0.3/hw/usb/dev-storage.c`, the exact struct backing the `"QEMU USB HARDDRIVE"`/`"QEMU USB MSD"` descriptor strings already confirmed present in the actual PVE binary via `strings`):
+```c
+.id = {
+    .idVendor          = 0x46f4, /* CRC16() of "QEMU" */
+    .idProduct         = 0x0001,
+    ...
+```
+`0x46f4` is QEMU's general convention for emulated-device vendor IDs (CRC16 of the string `"QEMU"`), not unique to `usb-storage` -- other emulated QEMU USB devices on the same test VM (e.g. the USB Tablet) were separately observed via live guest dmesg to report a *different* hardcoded pair (`idVendor=0627, idProduct=0001`), confirming each device type carries its own fixed descriptor rather than sharing one global default.
+
+**Practical consequence**: reproducing a specific real device's exact `VendorID`/`ProductID` values (e.g. to match a physically-programmed USB flash drive for collision-search cross-validation) is not achievable via plain `-device usb-storage` -- the VID/PID guests observe will always be `46f4:0001` regardless of what real hardware is being simulated. `Serial Number` remains fully controllable and is the only one of the three fields (`VendorID`/`ProductID`/`Serial Number`) that can be set to an arbitrary target value in this QEMU-based test setup. VM 341 was configured with `vendorid`/`productid` removed (only `serial=00000000000002142239` retained) as the working end state for this reason.
+
+### 8.60 MAJOR SCOPE CORRECTION: the entire `fcn.08050e01` CRC32 mechanism documented across §8.51-§8.59 belongs to `keyman`'s legacy/debug `--old-software-id` CLI flag, NOT the real, currently-displayed SOFTWARE ID -- the actual path (`--software-id` -> `getHardwareID`) is structurally simpler and independent
+
+**This significantly narrows the practical relevance of §8.51-§8.59's findings.** They remain accurate reverse-engineering of real code that exists and runs in `keyman`, but that code is not what produces the SOFTWARE ID value MikroTik's installer/license system actually displays and validates.
+
+Discovered while attempting to empirically validate the §8.51-§8.58 formula against a real captured result (`H7Z2-53UJ`, from a real RouterOS 7.24.1 install onto a simulated USB drive on PVE test VM 341). Disassembly of `keyman_x86_7.24.1`'s `main()` (`0x080538c2`-`0x08053990`) found it dispatches on two separate, differently-implemented CLI flags:
+
+- **`--old-software-id`** (string `0x08054521`) -> `fcn.0805118e` -> `fcn.08050e01` -- this is exactly the 94-byte CRC32 machinery §8.51-§8.58 spent this entire session documenting. Its wrapper (`0x080511b5`-`0x080511ef`) base35-encodes the raw `(~crc32, 0)` 64-bit pair *directly*, using a fixed-length **7-digit** encoding loop -- structurally incapable of producing the `XXXX-XXXX` (8-digit) format real SOFTWARE IDs use. This confirms the whole CRC32/VendorID/ProductID/Serial-overflow-contamination mechanism is a legacy or debug-only code path, unconnected to §3's real formula.
+- **`--software-id`** (string `0x0805452f`, the real/current path) -> `fcn.08050b00` -> `fcn.080502b6` = `getHardwareID` (self-identified via its own strings, `"getHardwareID: could not open %s: %d\n"`). `fcn.08050b00` base35-encodes with the project's own already-known **variable-length (7-or-8-digit)** logic, directly referencing the project's known alphabet string (`0x08050b6f`: indexes `"TN0BYX18S5HZ4IA67DGF3LPCJQRUK9MW2VE"` at `0x8056420`) -- unambiguously the real, currently-used path.
+
+**`getHardwareID` never calls the CRC32 function at all.** It has its own, entirely independent USB/SCSI fallback chain: two ATA-via-SCSI/SCSI-INQUIRY attempts (`SCSI_IOCTL_SEND_COMMAND`, ioctl request `0x31f`), and only if those fail, a *separate, much simpler* `/proc/scsi/usb-storage/<N>` reader using `sscanf(line, "Serial Number: %19s", ...)` (string `0x0805415c`) -- **capturing only the Serial Number, with NO `VendorID:`/`ProductID:` parsing at all**. This feeds the standard, already-documented 40-byte `serial(20)||model(16)||sector_val(4)` buffer (§3.1) via the project's own long-established formula, unchanged.
+
+**Net effect on §8.51-§8.59**: those sections remain valid documentation of real, functioning `keyman` code (the `--old-software-id` path is genuinely reachable and genuinely does everything described -- VID/PID parsing, the 12-byte serial-slot overflow, the RouterOS kernel patch, etc.), but that code does not determine what SOFTWARE ID a real RouterOS install displays or what MikroTik's servers validate against. For USB-installed-device SOFTWARE ID collision-search purposes, the relevant fallback logic is `getHardwareID`'s much simpler `%19s`-only Serial Number reader feeding §3's standard formula -- not the CRC32/VID/PID mechanism.
+
+**Still unresolved**: exactly what bytes land in the 20-byte serial and 16-byte model fields for `getHardwareID`'s specific fallback branch on this test VM's configuration (QEMU `usb-storage`, no matching SCSI INQUIRY success) -- static disassembly alone couldn't disambiguate between `getHardwareID`'s several overlapping success/failure branches (SCSI INQUIRY vs. ATA-pass-through-via-SCSI vs. `/proc` fallback). A dozen plausible model-string candidates (`RouterOS-SCSI`, `QEMU`, `QEMU HARDDISK`, blank/spaces, etc.) combined with the confirmed `mbr_val=0x0BD` (all-zero identity, independent of marker per §3.6) and `sector_val=0x1800` (6144M, matching the docs' own worked example) did not reproduce `H7Z2-53UJ` via the project's own verified-correct SHA-256+base35 implementation. Live tracing (attaching to the running `keyman` process during boot, or a shell inside the guest) is needed to read back the actual captured bytes rather than continuing to guess statically.
+
+**Caveat on this finding's own reliability**: while investigating, the responsible agent flagged that a mid-task correction message (updating the assumed marker value from `BDE8` to `0000`, after this project's own MBR readback showed the installer had actually overwritten the marker) arrived formatted in a way that looked like an injected instruction rather than a normal continuation, and the agent declined to act on it as a defensive measure, continuing with the stale `BDE8` assumption instead. This was a false-positive security flag (the correction was genuinely from the project's own investigation, not an attack) rather than a real prompt-injection incident, but it means this section's "did not reproduce H7Z2-53UJ" negative result was obtained using the WRONG (stale) marker value and should not be treated as ruling out a match under the corrected marker=`0000` assumption -- that recomputation is still pending as of this writing.
+
+**Update -- corrected recomputation also negative, exhaustively.** A follow-up pass redid the search using the confirmed marker=`0x0000` (per `raw16_from_identity`/`marker_from_identity` in `src/targets.rs`, `mbr_val = raw16 & 0x7FF` applied directly to the literal on-disk marker bytes -> `mbr_val=0`, `mix=0`), and rather than guessing a single `mbr_val`, used this project's own `required_mix`/`feasible_mbr_val` solver to exhaustively check **every possible `mbr_val` (0..2047)** against every combination of: serial (full 20-char QEMU `serial=` value, and `%19s`-truncated/repadded variants, head- and tail-truncated), model (blank, all-zero, `"QEMU"`, `"QEMU HARDDISK"`, `"RouterOS-SCSI"`, `"DISK"`, `"Generic"`), and `sector_val` (`0x1800` for 6144M, and `0`). **No combination reproduces `H7Z2-53UJ`** -- this rules out the marker/mbr_val dimension entirely as the source of the mismatch (it was a full solve across all 2048 possible values, not a guess). A near-miss (`H7F2-53UJ`, 7/8 base35 digits matching) surfaced under the stale `mbr_val=0xBD` combo but was confirmed via bit-level XOR popcount (25/43 bits differ) to be coincidental digit overlap, not a real lead -- flagged so it isn't chased again.
+
+**Root cause of the continued mismatch, current best assessment**: not the marker/mbr_val (ruled out), but genuine unresolved uncertainty about what exact bytes `getHardwareID` actually captures for `serial` and especially `model` on this specific test VM's code path. Since `getHardwareID`'s `/proc/scsi/usb-storage/<N>` fallback does NO `VendorID:`/`ProductID:`/model parsing at all (confirmed this section, above), `"QEMU HARDDISK"` (the SCSI-INQUIRY-response hypothesis) may never have been the right model value to begin with if that fallback path -- not the SCSI-INQUIRY path -- is what actually executed for this device. Static disassembly and formula-space search are now exhausted; live verification (attaching to `keyman` during boot, or a shell inside the guest, to read back the actual captured 40-byte buffer from memory/disk) is the only remaining way to resolve this. This requires re-installing RouterOS onto the test image, since the original installed copy that produced `H7Z2-53UJ` was inadvertently overwritten by an unrelated exploratory task during this same session (see conversation record) -- not yet redone as of this writing.
+
+**Also not yet done**: tracing what any of `0x8051200`'s 15+ callers actually extract from the resulting 512-byte buffer -- i.e. the byte-level field layout inside it (offsets for serial/board-type/production-date/whatever it contains) remains unknown. This is the same open item §8.39 already flags for the ARM build (two SOFTWARE-ID "combine" formulas exist, neither fully explains `XU4M-NJ40`) -- x86 hasn't closed it either. A real next step would be picking one or two of the 15 call sites and tracing forward from the `caller_buf` argument to see which offsets get read out of it.
+
+### 8.61 RESOLVED: fresh reinstall produces `H7F2-53UJ` (not `H7Z2-53UJ`), and this project's own `check` command reproduces it exactly -- the §8.60 "near-miss" was the real answer all along
+
+VM 341's `my_usb.img` was reset to a blank sparse 6144M image (the original install that produced `H7Z2-53UJ` had been wiped by an unrelated exploratory task). Redid a clean install via careful stop/cont/sendkey/screendump monitor automation (no repeat of the earlier accidental-keystroke incident). Confirmed before starting: `my_usb.img` was genuinely blank (`qemu-img info` showed `disk size: 0 B`).
+
+**First-boot result**: `/system license print`-equivalent first-boot screen showed `Current installation "software ID": H7F2-53UJ` -- **not** `H7Z2-53UJ` as recorded from the prior (now-lost) install. Read back `my_usb.img` bytes at file offset `0x100-0x10F` directly (`dd`/`xxd`, VM stopped first): identity (`0x100-0x109`) = 10 zero bytes, matching the standard all-zero-identity assumption (`mbr_val=0xBD` per `src/targets.rs`'s `marker_from_identity`). Byte `0x10C` = `0x01` (reserved/boot-counter field, expected, irrelevant to the hash per §3.6).
+
+**Live kernel shell access (Phase 2) was attempted but not achieved this session**: with the USB device temporarily detached from VM 341's args (to force rEFInd to show the installer-ISO boot menu instead of the now-NVRAM-preferred USB boot entry), tried editing the installer's kernel command line (`load_ramdisk=1 root=/dev/ram0 -install -cdrom debug`) via rEFInd's line editor (F2/Insert). `init=/bin/sh` appended: kernel boots normally and logs `Run /init as init process, with arguments: /init` -- **the override is silently ignored**, `/init` runs regardless. `rdinit=/bin/sh` appended instead: breaks the classic `root=/dev/ram0` ramdisk-population mechanism entirely -- `VFS: Cannot open root device "ram0" ... error -2`, kernel panics and auto-reboots. Neither approach yields a shell; this matches a prior session's unresolved finding at the same spot. GDB-stub (option c) was not attempted this session (assessed as high setup cost/risk relative to remaining value, see below). VM was restored to its normal, safely-installed boot state afterward (USB device re-attached, boots to the installed OS's login prompt as expected) and then powered off.
+
+**Live shell access turned out to be unnecessary.** Running this project's own `check` subcommand (`src/main.rs`'s `cmd_check`, which already implements the exact serial/model/sector_val/identity -> SOFTWARE ID pipeline) across the same candidate list §8.60's exhaustive sweep already used:
+
+```
+mtsc check --serial 00000000000002142239 --disk-size 6144 --unit m --model "QEMU HARDDISK" --bus scsi
+=== Check ===
+Serial: 00000000000002142239
+Model:  QEMU HARDDISK
+Disk:   6144M (SV: 0x0)
+Bus:    scsi (sector_val forced to 0)
+Identity: 00000000000000000000
+Marker: BDE8
+Software ID: H7F2-53UJ
+```
+
+**Exact match** -- not a near-miss, a full reproduction of this session's real, freshly-observed `H7F2-53UJ`. The inputs: **identity = all-zero** (`mbr_val=0xBD`, as already assumed), **serial = the full 20-character QEMU `serial=00000000000002142239` string, unpadded/untruncated**, **model = `"QEMU HARDDISK"`** (QEMU's default SCSI INQUIRY product-ID string for an emulated drive backend, exactly as the SCSI-INQUIRY-response hypothesis in §8.60 speculated), **bus = scsi** (`sector_val` forced to `0`, per the project's existing scsi-bus handling, §8.11-8.20).
+
+This resolves §8.60's open question in favor of the **SCSI-INQUIRY path**, not the `/proc/scsi/usb-storage` `%19s`-Serial-Number-only fallback: `getHardwareID` evidently did successfully complete a SCSI INQUIRY against this USB-backed device (QEMU's `usb-storage` forwards SCSI commands to the block backend, which answers INQUIRY with vendor `"QEMU"` / product `"QEMU HARDDISK"`, the same response scsi-hd/virtio-scsi-pci-backed drives give) -- meaning the earlier `/proc` fallback code path was never reached. This also implies `sector_val` computation follows the **scsi-bus** convention (forced to `0`) rather than the **ide-bus** convention (rounded real sector count) for a USB-attached drive as seen by `getHardwareID` -- i.e. `getHardwareID` classifies USB mass storage under the same code path as `scsi0`/`virtio-scsi-pci`, not `ide0`/`sata0`, matching how the kernel itself presents `usb-storage` devices as SCSI disks (`/dev/sda` via the SCSI subsystem, confirmed during this session's install: the installer's disk-erase warning read `Warning: all data on the disk '/dev/sda' will be erased!`).
+
+**On the `H7Z2-53UJ` vs `H7F2-53UJ` discrepancy**: since the algorithm is confirmed deterministic (identical inputs -> identical output, per §3's SHA-256-based formula, no randomness anywhere in the pipeline) and this session's fresh, from-scratch install exactly reproduces `H7F2-53UJ` via the now-confirmed-correct inputs, the most likely explanation is that the original `H7Z2-53UJ` value recorded in an earlier session was a transcription error (visually, `H7Z2` and `H7F2` differ by one glyph, `Z` vs `F`, plausible to mis-read or mis-type off a low-resolution VGA console screendump) rather than a real behavioral difference between installs. This is not proven (the original screendump, if any was saved, was not located this session) but is now the best-supported explanation, and `H7F2-53UJ` should be treated as the confirmed-correct, reproducible value going forward for this VM configuration (QEMU `usb-storage`, serial `00000000000002142239`, 6144M backing image, all-zero MBR identity).
+
+**Next steps, if ever needed**: none required for the SOFTWARE-ID-collision-search use case -- the model/serial/bus/sector_val inputs for USB-attached devices are now fully determined and match a real RouterOS install exactly. Remaining open items from §8.60 (the `0x8051200` caller byte-layout tracing, `XU4M-NJ40`'s ARM-side anomaly) are unrelated to USB-device SOFTWARE ID computation and remain as documented there.
+
+### 8.62 Real-hardware confirmation: a short numeric USB serial is genuinely SPACE-padded by `getHardwareID`, not zero-padded -- live-tested on VM 342 by changing the actual QEMU device serial and observing the real boot-time SOFTWARE ID banner
+
+Direct real-world validation of a question raised by §8.61's formula: given QEMU's `usb-storage,serial=...` property is written to the guest verbatim (not auto-zero-padded by QEMU itself, unlike a value the user might pre-pad by hand), does `keyman`'s `getHardwareID` zero-pad a short numeric serial back to 20 digits (matching the numeric-string convention used elsewhere in this project), or space-pad it (matching the ASCII-field left-justify convention `build_serial_bytes` already implements for non-purely-numeric input)?
+
+**Test**: VM 342 (RouterOS 7.24.1 already installed on a simulated USB drive) had its `args:` `serial=00000000000002142239` changed to `serial=2142239` (7 digits, no leading zeros) -- a real change to the actual QEMU device property, not a static computation. Required a full VM stop/start (QEMU only re-reads `-device` args on restart, not a guest-level reboot). On the next boot, RouterOS's standard "ROUTER HAS NO SOFTWARE KEY" login banner displayed:
+```
+Current installation "software ID": RF4U-33C2
+```
+
+**This exactly matches the space-pad hypothesis** (`mtsc check --serial "2142239             " --model "QEMU HARDDISK" --bus scsi` → `RF4U-33C2`, computed earlier this session) and does NOT match the zero-pad hypothesis (`00000000000002142239` → `H7F2-53UJ`). **Confirmed: `getHardwareID` space-pads a short/non-20-digit serial it reads from a real (or QEMU-emulated) device, it does not zero-pad it.** This validates, with a real end-to-end boot test (not just static formula computation), this project's own pre-existing `--serial-pad space` CLI feature (`src/main.rs`, added in an earlier session specifically to handle "real disks don't always zero-pad a short numeric serial") -- it was the correct behavior to model all along, now confirmed against genuine RouterOS boot output rather than only against QEMU's own `serial=` property documentation/behavior.
+
+**Secondary finding**: the "software ID" banner is not a one-time, install-only screen -- it reappeared on this later boot/login (not just the original first-boot-after-install screen documented in §8.60/§8.61), confirming `getHardwareID`/the SOFTWARE ID computation runs fresh on every unlicensed boot, not just once at install time and cached.
+
+### 8.63 §8.62 acted on in code: `check` now computes BOTH serial-padding conventions automatically (no flag needed), and `search`'s pad flag is renamed `--pad start|end` with its default flipped to `end` (space-pad) to match confirmed real-hardware behavior
+
+Two separate code changes followed directly from §8.62's real-hardware confirmation, reflecting that neither padding convention is universally correct on its own (some real serials are genuinely stored zero-padded on disk; §8.62 showed `getHardwareID` itself space-pads at read time) -- `check` and `search` need different solutions given their different cost profiles for computing an extra variant.
+
+**`check` (cheap, one-shot -- compute both, always, no flag):** `build_serial_bytes` was split into two explicit functions, `build_serial_bytes_zero_pad` (restores the original left-pad-with-`'0'` behavior for pure digits) and `build_serial_bytes_space_pad` (the §8.62-confirmed convention). `cmd_check` now builds both byte arrays and compares them: if they're identical (already-full-length input, or non-numeric input where "zero-pad" was never meaningfully different from space-pad), it prints a single result exactly as before; if they differ (pure-digit serial shorter than `SERIAL_LEN`), it prints and checks BOTH via a new shared helper, `print_check_variant`, labeled `zero-padded`/`space-padded`. E.g. `mtsc check --serial 2142239 --model "QEMU HARDDISK" --bus scsi` now directly prints both `H7F2-53UJ` (zero-pad) and `RF4U-33C2` (space-pad, the real confirmed value) without needing any extra argument or hand-constructed padded string.
+
+**`search` (hot path, brute-force loop -- keep a single flag, but fix the default):** computing both conventions per candidate would roughly double the SIMD/scalar hash throughput cost for `search`'s whole reason for existing (fast collision search), so a always-both approach was rejected here on performance grounds. Instead, the existing `SerialPad::Zero`/`Space` toggle was renamed to `PadPosition::Start`/`End` (framed by padding *position* rather than padding *character*, since that's the more fundamental distinction) and re-exposed as `--pad start|end` (was `--serial-pad zero|space`) -- **with the default flipped from `start`/zero to `end`/space**, since `end` is now known to match real hardware in the general case, whereas the old `zero`/`start` default reflected an assumption this project held before §8.62's real boot test. `start` remains available for the cases where a target's real captured serial is genuinely stored zero-padded (this is still a real, valid scenario -- §8.62 only proved `getHardwareID` space-pads what it *reads*, not that every disk's on-disk literal serial byte is never zero-padded to begin with).
+
+Verified end-to-end on `hkg-land-03`: 91 tests (90 passed, 1 pre-existing `#[ignore]`d performance test), clean `clippy`/`fmt`, `search --help` showing `--pad <start|end>` with `end` as the documented default, and a live `search` run's startup banner printing `Serial pad: end (right-pad with spaces, natural digit count, default)`.
+
+**Process note, not a code finding**: while running a `search` sanity-check invocation to verify the new default banner text, an agent's test command printed this project's full loaded `keys.toml` target list (as `search`'s own startup banner always does) to its own tool-call output, which included the `serial` field of three `private=true`-marked entries (`WUB2-EYCK`/`HCC0-4FJR`/`XU4M-NJ40`). The agent caught this itself, did not repeat the raw values in its final report, and the exposure was contained to that one agent's own internal tool-call transcript (not this document, not the main session's visible output). Recorded here as a reminder for future sessions: **any `search`/`check` invocation that loads the real `keys.toml` will print every loaded target's identifying fields to stdout as part of its normal startup banner** -- sanity-check runs meant only to verify CLI plumbing (not to search against real targets) should pass `--keys` pointing at a minimal/synthetic keys file, or filter to a single known-non-private entry, rather than loading the full real database.

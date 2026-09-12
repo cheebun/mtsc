@@ -4,7 +4,7 @@ Machine-executable rules for all AI tools working on this Rust project.
 
 ## Project
 
-`ros-serialgen` — RouterOS serial generator + key conversion CLI tool. Computes serials from an existing license (any level, L1-L6 -- the SOFTWARE ID computation and collision-search process don't depend on `nlevel`) via SOFTWARE ID collision search; custom model strings supported.
+`mtsc` — RouterOS serial generator + key conversion CLI tool. Computes serials from an existing license (any level, L1-L6 -- the SOFTWARE ID computation and collision-search process don't depend on `nlevel`) via SOFTWARE ID collision search; custom model strings supported.
 
 ## Architecture
 
@@ -23,41 +23,48 @@ src/
 ├── sha256_scalar.rs     Scalar SHA-256 backup (#[cfg(test)], for cross-validation)
 ├── sha256_simd.rs       AVX-512 SIMD 16-way parallel SHA-256
 ├── software_id.rs       Base-35 encode/decode + sector_val rounding
-├── targets.rs           Load collision targets from keys.toml
+├── targets.rs           Load collision targets and derive MBR mixes
+├── mbr_table.rs         Validate identity/marker lookup table overrides
 ├── convert.rs           signature_hex ↔ Key text conversion (MTBase64) + metadata decode
 └── curve25519.rs        EC-KCDSA local license verification (curve25519-dalek-based, §8.32)
 
 keys.toml                External key configuration (loaded at runtime, no recompile needed)
+mbr-table.toml           Embedded complete MBR lookup table; optional validated runtime overrides
 ```
 
 ## Commands
 
 ```bash
 # Search for collisions
-ros-serialgen search --disk-size <N> --unit <g|m|k|b> --threads <threads> [--count <count>] [--from <from_M>] [--model <model>] [--keys <keys.toml>] [--identity <identity_hex>] [--bus <ide|scsi>]
-  --disk-size  Disk size magnitude, paired with --unit
+mtsc search --disk-size <N> --unit <g|m|k|b> --threads <threads> [--count <count>] [--from <from_M>] [--model <model>] [--keys <keys.toml>] [--identity <identity_hex>] [--bus <ide|nvme|scsi>] [--pad <start|end>] [--alphabet <symbols>] [--mbr-table <path>]
+  --disk-size  Disk size magnitude, paired with --unit; optional for scsi only if --model is supplied
   --unit       Unit: g (gigabytes, default), m (megabytes), k (kilobytes), b (bytes) -- min size is 64M in any unit
   --threads    Thread count
   --count      Collision count (default 1, 0 = unlimited collection)
   --from       Resume from N million hashes (matches the M value in progress output)
   --model      Custom Model (default ROS<N><unit>, e.g. ROS100G, ROS128M)
   --keys       Specify keys.toml path
-  --identity   Non-standard 20-hex-char MBR identity (0x100-0x109); default is the standard all-zero identity
-  --bus        Disk bus: ide (default, covers ide0/sata0) or scsi (scsi0/virtio-scsi-pci)
+  --identity   Fix a 20-hex-char MBR identity (0x100-0x109); omitted search identity sweeps all 2048 mbr_val values
+  --bus        Disk bus: ide (default, covers ide0/sata0), nvme (same rounding), or scsi (sector_val=0)
+  --pad        start: left-pad with alphabet[0]; end (default): right-pad natural serial with spaces
+  --alphabet   Ordered unique ASCII alphanumeric symbols (at least 2); default 0123456789
+  --mbr-table  Validated runtime overrides for the embedded complete identity/marker lookup table
 
 # Verify a serial
-ros-serialgen check --serial <value> --disk-size <N> --unit <g|m|k|b> [--model <model>] [--keys <keys.toml>] [--identity <identity_hex>] [--bus <ide|scsi>] [--license <license.key>]
+mtsc check --serial <value> --disk-size <N> --unit <g|m|k|b> [--model <model>] [--keys <keys.toml>] [--identity <identity_hex>] [--bus <ide|nvme|scsi>] [--license <license.key>]
   --license    Compare a .key file's (or raw signature_hex file's) embedded SOFTWARE ID against the one computed above
+  --identity   Unlike search, check still defaults to the standard all-zero identity
+  # Short numeric serials are checked with both zero- and space-padding; identical byte inputs are deduplicated.
 
-# Conversion (also prints SOFTWARE-ID/VERSION/LEVEL/NONCE-HASH/SIGNATURE/LICENSE-VALID metadata to stderr)
-ros-serialgen sig2key <128-char-hex>     # signature → Key text
-ros-serialgen key2sig <file.key>         # Key text → signature
+# Conversion (prints a unified metadata, signature hex, and key-text report to stdout)
+mtsc sig2key <128-char-hex>     # signature → Key text
+mtsc key2sig <file.key-or-text> # Key text or path → signature
 
 # Algorithm self-check
-ros-serialgen verify
+mtsc verify
 
 # Shell completion (bash/zsh/fish/powershell/elvish)
-ros-serialgen completions <shell>
+mtsc completions <shell>
 ```
 
 ## Build
@@ -67,13 +74,29 @@ cargo build --release   # Portable; CPU-specific kernels selected once at startu
 RUSTFLAGS='-C target-cpu=native' cargo build --release   # Optional machine-local build
 cargo bench --bench hash_backends -- --threads 1 --seconds 1 --samples 5
 cargo test          # Architecture-gated tests; see output for count and unsupported-feature skips
-cargo clippy        # a handful of pre-existing lints (too-many-arguments on CLI-plumbing functions, etc.); no new categories from recent changes
+cargo clippy --all-targets -- -D warnings
 cargo fmt --check   # format check
 ```
 
 ## Documentation Style
 
 - Command-line examples in `docs/` and `AGENTS.md` use **long-form flags** (`--disk-size`, not `-s`) for readability -- short flags are fine in interactive/muscle-memory use but obscure meaning for a reader seeing the command cold.
+
+## Private Data Handling
+
+`keys.toml` is gitignored (never reaches the public repo), but chat/tool-output transcripts are a
+separate leak surface. Entries marked `private = true` in `keys.toml` are under an explicit
+disclosure restriction from the user (currently: the 99 real-hardware CCR1009 licenses imported
+2026-09-07, plus `WUB2-EYCK`, `HCC0-4FJR`, `XU4M-NJ40`):
+
+- Never paste their `identity`, `model`, `serial`, or `signature_hex` field values into a chat
+  response or tool-call diff (Edit old_string/new_string included) — refer to them only by
+  `software_id`.
+- Entries **without** `private = true` are not covered by this restriction and may be discussed/
+  quoted normally (as has been done throughout this project's docs/investigation notes).
+- When adding a new `[[key]]` entry sourced from the user's own private license inventory (as
+  opposed to a publicly-documented forum post etc.), default to `private = true` and follow the
+  same non-disclosure handling above unless the user says otherwise.
 
 ## Code Rules
 
@@ -109,7 +132,7 @@ Base-35 table: "TN0BYX18S5HZ4IA67DGF3LPCJQRUK9MW2VE"
 - `_mm512_shuffle_epi8` SIMD byte-order conversion
 - bswap mask hoisted to function top for reuse
 - BCD incremental counter + W[5..9] precomputation
-- sid_hi lookup pre-filter (256-byte lookup table)
+- Full-width sid_hi lookup pre-filter (512 entries, including the required bit 8); sweep matching bypasses fixed-identity prefilter
 
 ## Testing
 
@@ -120,8 +143,10 @@ Base-35 table: "TN0BYX18S5HZ4IA67DGF3LPCJQRUK9MW2VE"
 - `software_id::tests::test_decode_invalid_char` — invalid character error
 - `software_id::tests::test_round_sectors` — 5 rounding verification cases
 - `convert::tests::test_roundtrip_synthetic` — sig ↔ key conversion verification
-- `main::tests` — disk size parsing/validation, write_serial, BCD, software_id, model, input_buf, check_match, E2E, identity parsing/mix resolution
-- `targets::tests` — 3 tests covering `mix_from_identity` (matches standard for all-zero, deterministic, differs for non-zero)
+- `main::tests` — all-supported-backend search matrix (alphabet, padding, fixed/sweep, thread offsets, u64 wrap), finite candidate exhaustion, full-SID self-verification, input validation and E2E vectors
+- `targets::tests` — identity/mix formulas, full-width target matching, sweep feasibility and legacy SID-only TOML parsing
+- `mbr_table::tests` — complete embedded table consistency and validation/fallback of partial or malformed overrides
+- `tests/cli.rs` — mtsc naming/completions, conversion reports, dual-padding check, synthetic fixed/sweep hits, custom alphabets and argument errors
 - `curve25519::tests` — EC-KCDSA verify against `TI09-7WK3`'s real, hardware-activation-confirmed
   signature (must return `true`), plus rejection tests for a tampered signature/payload/wrong
   public key (must return `false`) -- see `docs/investigation/license-internals.md` §8.32
@@ -130,6 +155,7 @@ Base-35 table: "TN0BYX18S5HZ4IA67DGF3LPCJQRUK9MW2VE"
 
 - `clap` 4.x — CLI framework (derive mode)
 - `clap_complete` 4.x — shell completion script generation (`completions` subcommand)
+- `serde` 1.x and `toml` 1.x — structured key configuration and MBR table parsing
 - `curve25519-dalek` 4.x — audited Curve25519 field/point arithmetic for EC-KCDSA local license
   verification (`LICENSE-VALID` output); see `docs/investigation/license-internals.md` §8.32 for why this one
   isn't hand-implemented

@@ -63,7 +63,7 @@ PVE Web UI > Create VM:
 
 The disk size must match the collision table entry **exactly** (in bytes). The procedure differs by storage backend -- check which one you're using with `pvesm status`.
 
-**This project's collision database (§1-7, `docs/collision-database.md`) is verified against `ide0` -- and, confirmed identical, `sata0`.** `keyman` computes the SOFTWARE ID differently depending on how the disk is presented to the guest kernel: `ide0` and `sata0`/AHCI both use real ATA IDENTIFY data (`sata0`'s QEMU device is `ide-hd`, the same device model as `ide0`, just on an AHCI controller) and are therefore interchangeable for collision-search purposes -- an `ide0` table entry activates on a same-size `sata0` disk with no changes. `scsi0`/`virtio-scsi-pci` is the outlier: it uses SCSI INQUIRY + VPD page 0x80, a genuinely different encoding (see [license-internals.md §8](../investigation/license-internals.md#8-arm32-keyman-on-virtio-scsi-a-platform-specific-investigation)). **A `serial=`/`model=` combo verified for `ide0`/`sata0` will not produce the same SOFTWARE ID on `scsi0`, and vice versa** -- use `ros-serialgen`'s `-b`/`--bus` flag (`ide` covers both `ide0` and `sata0`; `scsi` is `scsi0`-specific) matched to whichever bus you're targeting.
+**This project's collision database (§1-7, `docs/collision-database.md`) is verified against `ide0` -- and, confirmed identical, `sata0`.** `keyman` computes the SOFTWARE ID differently depending on how the disk is presented to the guest kernel: `ide0` and `sata0`/AHCI both use real ATA IDENTIFY data (`sata0`'s QEMU device is `ide-hd`, the same device model as `ide0`, just on an AHCI controller) and are therefore interchangeable for collision-search purposes -- an `ide0` table entry activates on a same-size `sata0` disk with no changes. `scsi0`/`virtio-scsi-pci` is the outlier: it uses SCSI INQUIRY + VPD page 0x80, a genuinely different encoding (see [license-internals.md §8](../investigation/license-internals.md#8-arm32-keyman-on-virtio-scsi-a-platform-specific-investigation)). **A `serial=`/`model=` combo verified for `ide0`/`sata0` will not produce the same SOFTWARE ID on `scsi0`, and vice versa** -- use `mtsc`'s `--bus` flag matched to the target: `ide` covers `ide0` and `sata0`, `scsi` covers `scsi0`, and `nvme` uses the same size-dependent rounding as `ide`. For `--bus scsi`, `--disk-size` can be omitted, but then `--model` is required.
 
 `--bus scsi` search results **have been confirmed activatable end-to-end** on x86_64 (`scsi0`/`virtio-scsi-pci`, fresh install, standard PVE-default `smbios1`, no special configuration needed -- §8.18). On ARM64 (`virt` machine type specifically), the same disk-bus difference additionally interacts with a separate QEMU/KVM-virtualization-detection code path in `keyman` that can prevent the MBR signature from validating even when the SOFTWARE ID is correct (§8.15-8.17, unresolved for that platform) -- if targeting ARM64 + `scsi0`, verify activation on real hardware before relying on it.
 
@@ -163,7 +163,9 @@ qm monitor 100
 
 Requires the VM to be shut down. Look up the signature for your SOFTWARE ID from the table below.
 
-Example uses the C7CU-PGT9 signature; substitute the row for your own SOFTWARE ID from the [Signature Table](../database/collision-database.md#signature-table).
+Example uses the C7CU-PGT9 signature and the older all-zero identity/BDE8 marker; substitute the row for your own SOFTWARE ID from the [Signature Table](../database/collision-database.md#signature-table).
+
+**Search compatibility:** current `mtsc search` defaults to all 2048 `mbr_val` values and `--pad end` (right spaces). For a new result, preserve its printed serial and write its output **identity and marker**, not the fixed header in these examples. Recheck with `mtsc check --serial <serial> --disk-size <N> --unit <g|m|k|b> --model <model> --identity <identity-from-search>` and the matching `--bus`; `check` without `--identity` still means all zeros. Short numeric serials show zero- and space-padding results separately. To search under this guide's original convention, add `--identity 00000000000000000000 --pad start` and keep the full 20-digit serial in the VM configuration.
 
 **Directory storage (qcow2)** -- mount via `qemu-nbd` first:
 
@@ -190,8 +192,8 @@ hexdump -C -s 0x100 -n 80 /dev/pve/vm-100-disk-0
 ```
 
 Verification checklist:
-- `0x100-0x109`: all zeros
-- `0x10A-0x10B`: `bd e8`
+- `0x100-0x109`: identity from the matching result (all zeros only for this example)
+- `0x10A-0x10B`: marker from the matching result (`bd e8` only for this example)
 - `0x10C-0x10F`: all zeros
 - `0x110-0x14F`: matches the signature for your SOFTWARE ID
 
@@ -204,15 +206,15 @@ No shutdown required. The VM can be running after installation.
 Generate the key text on demand from the signature hex in the [Signature Table](../database/collision-database.md#signature-table) below:
 
 ```bash
-ros-serialgen sig2key <signature-hex-from-table-above>
+mtsc sig2key <signature-hex-from-table-above>
 ```
 
-This outputs a `-----BEGIN MIKROTIK SOFTWARE KEY-----...-----END...-----` block ready to paste.
+This outputs a unified stdout report with metadata, MBR signature hex, and a `License:` key-text field. Copy only the complete `-----BEGIN MIKROTIK SOFTWARE KEY-----...-----END...-----` block, without the label or metadata; do not redirect the whole report into a `.key` file.
 
 ```bash
 mkdir -p /tmp/serve
 cat > /tmp/serve/license.key << 'EOF'
-<paste the output of ros-serialgen sig2key for the corresponding SOFTWARE ID>
+<paste the output of mtsc sig2key for the corresponding SOFTWARE ID>
 EOF
 cd /tmp/serve && python3 -m http.server 8080 &
 ip addr add 10.255.255.1/24 dev vmbr0 2>/dev/null
@@ -232,10 +234,10 @@ When prompted `Reboot? [y/N]:`, enter `y`.
 
 ### Method C: Console Direct Import
 
-Generate the key text from the signature hex in the [Signature Table](../database/collision-database.md#signature-table) below, then paste it directly in the RouterOS console:
+Generate the key text from the signature hex in the [Signature Table](../database/collision-database.md#signature-table) below, then paste only the complete `BEGIN`/`END` key block (not the `License:` label, metadata, or MBR hex) directly in the RouterOS console:
 
 ```bash
-ros-serialgen sig2key <signature-hex-from-table-above>
+mtsc sig2key <signature-hex-from-table-above>
 ```
 
 ```
@@ -298,7 +300,7 @@ qm set 100 --boot order=ide0
 License data missing or mismatched. Verify:
 
 1. Serial and model match the collision table exactly
-2. MBR `0x10A-0x10B` reads `BD E8` (not `FF FF`)
+2. MBR identity and marker match the result (`BD E8` only for the all-zero identity example, not a universal marker; installer-written `FF FF` is not the expected license marker)
 3. MBR was written **after** installation (the installer overwrites these bytes)
 4. The signature at `0x110-0x14F` corresponds to the correct SOFTWARE ID
 

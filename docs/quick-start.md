@@ -8,7 +8,7 @@ Deploy a licensed RouterOS virtual machine on Proxmox VE using a pre-computed co
 
 - Proxmox VE 8.x or 9.x host with SSH access
 - RouterOS x86 ISO uploaded to PVE storage ([download](https://mikrotik.com/download))
-- `ros-serialgen` binary built (`cargo build --release`)
+- `mtsc` binary built (`cargo build --release`)
 
 > **Note**: Commands below use `100` as an example VM ID. Replace it with a VMID that is free on your PVE host -- check with `qm list` first.
 
@@ -35,11 +35,13 @@ Pick your disk size from the table below. For sizes not listed, see the [full co
 
 All entries above use space-free model names, so no `%20` encoding is needed.
 
-For unlisted sizes, search for a new collision (see [command-reference.md](reference/command-reference.md) for what each flag does; sub-1GB sizes are supported via `-u m/k/b`, minimum 64MB):
+The table and fixed MBR header in this walkthrough use the older **20-digit zero-padded serial + all-zero identity** convention. For unlisted sizes, the following command preserves that convention (see [command-reference.md](reference/command-reference.md); sub-1GiB sizes use `--unit m/k/b`, minimum 64MiB):
 
 ```bash
-ros-serialgen search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml
+mtsc search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml --identity 00000000000000000000 --pad start
 ```
+
+For the current defaults, omit `--identity` and `--pad`: search covers all 2048 `mbr_val` values per candidate and right-pads the natural serial with spaces. **Use the output serial, identity, and marker together**; replace Step 5's entire MBR hex with the matching result rather than reusing its all-zero/BDE8 header. Recheck with `mtsc check --serial <serial> --disk-size <N> --unit <g|m|k|b> --model <model> --identity <identity-from-search>`; `check` otherwise defaults to all-zero identity and shows both padding variants for short numeric serials.
 
 ---
 
@@ -108,7 +110,7 @@ hexdump -C --disk-size 0x100 -n 80 /dev/nbd0
 qemu-nbd --disconnect /dev/nbd0
 ```
 
-Verify: `0x10A-0x10B` must read `bd e8`; `0x110` onward must match the signature.
+Verify this example's `0x10A-0x10B` reads `bd e8`; `0x110` onward must match the signature. For a new sweep result, verify `0x100-0x109` and `0x10A-0x10B` against its output identity and marker instead.
 
 ---
 
@@ -145,15 +147,15 @@ Instead of writing the MBR offline, you can import a key file while RouterOS is 
 Generate the key text from the signature hex for your SOFTWARE ID (see the [Signature Table](database/collision-database.md#signature-table)):
 
 ```bash
-ros-serialgen sig2key <signature-hex-from-table>
+mtsc sig2key <signature-hex-from-table>
 ```
 
-This prints a `-----BEGIN MIKROTIK SOFTWARE KEY-----...-----END...-----` block. Paste it into the key file on the PVE host:
+This prints metadata, MBR signature hex, and a `License:` field on stdout. Copy **only the complete `-----BEGIN MIKROTIK SOFTWARE KEY-----...-----END...-----` block**, without the `License:` label or metadata, into the key file on the PVE host; do not redirect the entire command output as a `.key` file:
 
 ```bash
 mkdir -p /tmp/serve
 cat > /tmp/serve/license.key << 'EOF'
-<paste the output of ros-serialgen sig2key here>
+<paste the output of mtsc sig2key here>
 EOF
 cd /tmp/serve && python3 --model http.server 8080 &
 ip addr add 10.255.255.1/24 dev vmbr0 2>/dev/null

@@ -78,14 +78,16 @@ qm start ${VMID}
 
 Everything above works identically for a `scsi0`-attached disk -- the installer's `sendkey` sequence doesn't care about disk bus type. Differences vs. the `ide0` examples above:
 
-- Use `ros-serialgen search`/`check --bus scsi` to get a `serial=`/`product=` combo (not `--model=`/`--serial=` from an `ide0` search -- see [license-internals.md §8](../investigation/license-internals.md#8-arm32-keyman-on-virtio-scsi-a-platform-specific-investigation) for why they're not interchangeable).
+- Use `mtsc search --bus scsi --model <product>` or `mtsc check --bus scsi --model <product> --serial <serial>` for the SCSI serial/product pair; `--disk-size` is optional, but `--model` is required without it. Do not reuse an IDE result without checking it -- see [license-internals.md §8](../investigation/license-internals.md#8-arm32-keyman-on-virtio-scsi-a-platform-specific-investigation). Preserve the search result's identity/marker; `check` needs `--identity <identity-from-search>` for a nonzero identity.
 - VM config: `--scsihw virtio-scsi-pci`, `--scsi0 local:<vmid>/vm-<vmid>-disk-1.qcow2,serial=<serial>,size=<any size>` (disk size is irrelevant on `scsi0` -- `sector_val` is always `0` regardless of actual disk size, confirmed at both 1GiB and 2GiB), plus `--args '-set device.scsi0.product=<product>'` (no `vendor=` override needed -- it was confirmed to never participate in the hash computation).
 - The MBR write step (below) is unchanged -- same offset (`0x100`), same header format, same signature encoding, regardless of bus type.
 - Confirmed to fully activate (`nlevel: 6`, no `expires-in`) end-to-end on x86_64 with a fresh install and standard PVE-default `smbios1` -- no special SMBIOS configuration required.
 
 ## Verifying the result without console access
 
-Since `sendkey` can't read the screen, and typing multi-line commands (network config, key import) character-by-character via `sendkey` is slow and error-prone, prefer the **MBR write method** to activate the license instead of console-based key import -- it requires the VM to be stopped, not a live console session:
+Since `sendkey` can't read the screen, and typing multi-line commands (network config, key import) character-by-character via `sendkey` is slow and error-prone, prefer the **MBR write method** to activate the license instead of console-based key import -- it requires the VM to be stopped, not a live console session.
+
+The fixed header below applies only to an **all-zero-identity** result. For default sweep results, replace the complete hex string with the matching identity, marker, four zero reserved bytes, and signature from that result; see the compatibility note at the end of this guide.
 
 ```bash
 qm stop ${VMID} --skiplock
@@ -131,31 +133,27 @@ Creating the verification disk with the nominal power-of-2 size (e.g. `171798691
 
 ## Lesson: signatures captured from real hardware need that hardware's identity bytes too
 
-This project's own collision search always assumes a fixed, all-zero MBR identity region (`0x100-0x109`), giving a fixed `mbr_val = 0x0BD` and thus a fixed mix. Every serial `ros-serialgen search` finds is specifically brute-forced to work with *that* fixed mix -- so writing the standard header (`00000000000000000000BDE800000000` + signature) always reproduces the correct SOFTWARE ID for those results.
+The older collision tables used all-zero identity bytes (`0x100-0x109`), giving `mbr_val = 0x0BD` and the standard `00000000000000000000BDE800000000` header. To reproduce that search convention today, explicitly add `--identity 00000000000000000000 --pad start`.
 
-**This does not hold for signatures extracted from a real physical device.** A real device's MBR identity bytes are whatever it shipped with -- not all-zero -- so its `mbr_val` (and therefore its mix) is different from the collision-search convention. The device's serial + model + disk size were only ever hashed against *that* device's own mix to produce its SOFTWARE ID.
+**Current default search is different:** without `--identity`, `mtsc search` covers all 2048 `mbr_val` values for each candidate. It also defaults to `--pad end` (right spaces). Deploy the printed serial, identity, and marker as a set; the fixed header above is not valid for every new hit. `mtsc check` still defaults to all-zero identity, so pass the hit's `--identity` when rechecking. Short numeric serials produce both zero- and space-padding results; preserve a full 20-byte serial when reproducing a zero-padded table row.
 
-This is not a new discovery -- it's exactly what [experiments.md](../investigation/experiments.md) Experiment 3 already documented from the earliest phase of this project: an original device's non-standard identity bytes stop matching the moment they're zeroed out. It's easy to lose sight of this once `ros-serialgen search` -- which always assumes the fixed all-zero convention -- becomes the primary daily workflow.
-
-Writing the *real* signature with the *standard* all-zero header, using that same serial/model/size, computes a **different** SOFTWARE ID than the one the signature was issued for -- the license import will appear to succeed (SOFTWARE ID and signature both look well-formed) but RouterOS falls back to a 24-hour trial (`expires-in` present, no permanent `nlevel: 6`), because the signature doesn't cryptographically validate for the SOFTWARE ID your disk actually computed.
-
-**Fix**: when reproducing a signature captured from a real device, write the MBR identity bytes exactly as they were on that device, not the standard all-zero header:
+For a signature captured from a real device, preserve that device's identity and matching marker rather than replacing them with zeros/BDE8. As [experiments.md](../investigation/experiments.md) Experiment 3 showed, changing identity can change SOFTWARE ID even when serial/model/size stay fixed. The marker is derived from identity too, not universally `BD E8`; see [identity-marker-formula.md](../reference/identity-marker-formula.md).
 
 ```bash
-# Standard collision-search header (works only for search results using the fixed mix)
+# Legacy all-zero-identity result only
 HEADER="00000000000000000000BDE800000000"
 
-# Real-device header: <original identity bytes (10 bytes)><BD E8><4 zero bytes>
-HEADER="<original-10-byte-identity-hex>BDE800000000"
+# New sweep result or real-device identity: use its matching marker as well
+HEADER="<10-byte-identity-hex><2-byte-marker-hex>00000000"
 
 echo -n "${HEADER}<signature-hex>" | xxd -r -p | dd of=<disk> bs=1 seek=256 count=80 conv=notrunc
 ```
 
-| | Collision search results | Real-device-captured signatures |
-|---|---|---|
-| Identity bytes (`0x100-0x109`) | Fixed all-zero | The original device's actual bytes |
-| `mbr_val` / mix | Fixed `0x0BD` | Device-specific |
-| Serial | Brute-forced for the fixed mix | The device's own serial, tied to its own mix |
-| MBR header to write | Standard `00...BDE8...` | `<original identity>BDE8...` |
+| | Legacy fixed-identity results | Default sweep results | Real-device reproduction |
+|---|---|---|---|
+| Identity (`0x100-0x109`) | All zeros | From search output | Original device's bytes |
+| `mbr_val` / mix | Fixed `0x0BD` | From the matching result | Derived from source identity |
+| Serial | Exact 20-digit zero-padded string | Exact output serial/padding | Source serial/padding |
+| Marker (`0x10A-0x10B`) | `BDE8` | From search output | Derived from source identity |
 
-The `0x10A-0x10B` marker (`BD E8`) and the `0x10C-0x10F` reserved bytes are unaffected -- only `0x100-0x109` needs to match the source device.
+The MBR format is unchanged: 10 identity bytes, 2 matching marker bytes, 4 reserved bytes (initialized to zero), then the 64-byte signature. A matching SOFTWARE ID alone is not a substitute for checking permanent activation in RouterOS.

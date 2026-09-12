@@ -183,7 +183,7 @@ fn mt_base64_encode(data: &[u8]) -> String {
     }
 
     // Padding
-    while encoded.len() % 4 != 0 {
+    while !encoded.len().is_multiple_of(4) {
         encoded.push('=');
     }
 
@@ -224,7 +224,7 @@ fn mt_base64_decode(data: &str) -> Result<Vec<u8>, String> {
 /// hex string → byte array
 fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
     let hex = hex.trim();
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err("hex string must have even length".to_string());
     }
     (0..hex.len())

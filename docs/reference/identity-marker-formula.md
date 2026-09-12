@@ -13,7 +13,7 @@ The 80-byte MBR license region breaks down as:
 | `0x10C-0x10F` | 4 bytes | reserved | Always `00000000` |
 | `0x110-0x14F` | 64 bytes | signature | The EC-KCDSA-signed license blob |
 
-This project's own collision search (`ros-serialgen search`/`check -i`) always assumes the standard all-zero `identity`, which happens to produce `mbr_val = 0x0BD` and is written with the marker `BD E8`. Real hardware devices ship with non-zero `identity` bytes, and -- as this document establishes -- a **matching, non-standard `marker`** that is not `BD E8`.
+The older collision-search convention used all-zero `identity`, which produces `mbr_val = 0x0BD` and marker `BD E8`. Current `mtsc search` without `--identity` covers all 2048 `mbr_val` values and prints the matching identity/marker; use both values when deploying a result. `mtsc check` still defaults to all-zero identity, or uses the explicit `--identity` and derives its marker. Real hardware can have nonzero identity and a different marker -- the marker must always match the identity.
 
 ## The formula
 
@@ -33,7 +33,7 @@ mix      = mbr_val * 0x3FF800F
 marker = raw16.to_bytes(2, 'little')
 ```
 
-This is why the "standard" marker is `BD E8`: for an all-zero `identity`, `raw16 = 0xE8BD`, and `0xE8BD & 0x7FF = 0x0BD` -- both the familiar `mbr_val = 0x0BD` *and* the familiar `marker = BD E8` fall out of the exact same computation, on the exact same input. They were never two independent constants; `BD E8` just happens to be what this formula produces for the identity value (`0`) this project has always used.
+This is why the "standard" marker is `BD E8`: for an all-zero `identity`, `raw16 = 0xE8BD`, and `0xE8BD & 0x7FF = 0x0BD` -- both the familiar `mbr_val = 0x0BD` *and* the familiar `marker = BD E8` fall out of the exact same computation, on the exact same input. They were never two independent constants; `BD E8` just happens to be what this formula produces for the identity value (`0`) used by the older fixed-identity search convention.
 
 ## Reference implementation (Python, self-contained)
 
@@ -78,4 +78,4 @@ Tested against every `identity` value currently on record in this project (`docs
 
 ## Implemented
 
-`targets::marker_from_identity(identity: &[u8; 10]) -> [u8; 2]` (`src/targets.rs`) computes the marker from an identity, sharing its `raw16` derivation with `mix_from_identity()` via a private `raw16_from_identity()` helper -- the two are now guaranteed consistent by construction, not just by convention. `cmd_check`'s `MBR HEX` output (`src/main.rs`) uses this automatically whenever `-i`/`--identity` is a non-standard identity, replacing the old hardcoded `BDE800000000` and the "supply your own marker" warning with the actually-derived marker. Covered by 4 unit tests in `targets.rs` (standard all-zero case, all 4 real `mbr-data.md` captures, and a consistency check against `mix_from_identity`'s `mbr_val` for arbitrary identities) -- `cargo test` 70/70 passing.
+`targets::marker_from_identity(identity: &[u8; 10]) -> [u8; 2]` (`src/targets.rs`) computes the marker from an identity, sharing its `raw16` derivation with `mix_from_identity()` via a private `raw16_from_identity()` helper -- the two are now guaranteed consistent by construction, not just by convention. `cmd_check`'s `MBR HEX` output (`src/main.rs`) uses this automatically whenever `--identity` is a non-standard identity, replacing the old hardcoded `BDE800000000` and the "supply your own marker" warning with the actually-derived marker. Covered by 4 unit tests in `targets.rs` (standard all-zero case, all 4 real `mbr-data.md` captures, and a consistency check against `mix_from_identity`'s `mbr_val` for arbitrary identities) -- `cargo test` 70/70 passing.

@@ -110,8 +110,8 @@ jobs:
       - name: Show toolchain
         run: rustc -vV
 
-      - name: Check calculation library
-        run: cargo clippy --lib --target ${{ matrix.target }} -- -D warnings
+      - name: Check all Rust targets
+        run: cargo clippy --all-targets --target ${{ matrix.target }} -- -D warnings
 
       - name: Run native release tests
         run: cargo test --release --target ${{ matrix.target }}
@@ -132,21 +132,21 @@ jobs:
       - name: Verify executable
         if: runner.os != 'Windows'
         shell: bash
-        run: '"target/$TARGET/release/ros-serialgen" verify'
+        run: '"target/$TARGET/release/mtsc" verify'
 
       - name: Verify Windows executable
         if: runner.os == 'Windows'
         shell: pwsh
-        run: '& "target/$env:TARGET/release/ros-serialgen.exe" verify'
+        run: '& "target/$env:TARGET/release/mtsc.exe" verify'
 
       - name: Package Linux and macOS archive
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          package="ros-serialgen-$BUILD_VERSION-$PLATFORM"
+          package="mtsc-$BUILD_VERSION-$PLATFORM"
           mkdir -p "dist/$package"
-          cp "target/$TARGET/release/ros-serialgen" README.md LICENSE keys.example.toml "dist/$package/"
+          cp "target/$TARGET/release/mtsc" README.md LICENSE keys.example.toml "dist/$package/"
           tar -czf "dist/$package.tar.gz" -C dist "$package"
           cd dist
           if [[ "$RUNNER_OS" == macOS ]]; then
@@ -160,11 +160,11 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $package = "ros-serialgen-$env:BUILD_VERSION-$env:PLATFORM"
+          $package = "mtsc-$env:BUILD_VERSION-$env:PLATFORM"
           $stage = Join-Path "dist" $package
           $archive = Join-Path "dist" "$package.zip"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item "target/$env:TARGET/release/ros-serialgen.exe" $stage
+          Copy-Item "target/$env:TARGET/release/mtsc.exe" $stage
           Copy-Item "README.md", "LICENSE", "keys.example.toml" $stage
           Compress-Archive -Path "$stage/*" -DestinationPath $archive
           $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
@@ -173,7 +173,7 @@ jobs:
       - name: Upload platform artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ros-serialgen-${{ matrix.platform }}
+          name: mtsc-${{ matrix.platform }}
           path: |
             dist/*.zip
             dist/*.tar.gz
@@ -193,7 +193,7 @@ jobs:
       - name: Download all platform artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: ros-serialgen-*
+          pattern: mtsc-*
           merge-multiple: true
           path: dist
 

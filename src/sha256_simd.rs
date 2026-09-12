@@ -26,6 +26,7 @@ macro_rules! rotr {
 }
 
 /// SHA-256 Σ0(a) = ROTR(a,2) ⊕ ROTR(a,13) ⊕ ROTR(a,22)
+#[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx512f")]
 unsafe fn big_sigma0(a: __m512i) -> __m512i {
@@ -33,6 +34,7 @@ unsafe fn big_sigma0(a: __m512i) -> __m512i {
 }
 
 /// SHA-256 Σ1(e) = ROTR(e,6) ⊕ ROTR(e,11) ⊕ ROTR(e,25)
+#[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx512f")]
 unsafe fn big_sigma1(e: __m512i) -> __m512i {
@@ -40,6 +42,7 @@ unsafe fn big_sigma1(e: __m512i) -> __m512i {
 }
 
 /// SHA-256 σ0(x) = ROTR(x,7) ⊕ ROTR(x,18) ⊕ (x >> 3)
+#[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx512f")]
 unsafe fn small_sigma0(x: __m512i) -> __m512i {
@@ -50,6 +53,7 @@ unsafe fn small_sigma0(x: __m512i) -> __m512i {
 }
 
 /// SHA-256 σ1(x) = ROTR(x,17) ⊕ ROTR(x,19) ⊕ (x >> 10)
+#[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx512f")]
 unsafe fn small_sigma1(x: __m512i) -> __m512i {
@@ -60,6 +64,7 @@ unsafe fn small_sigma1(x: __m512i) -> __m512i {
 }
 
 /// Ch(e,f,g) = (e & f) ^ (!e & g)  — ternarylogic 0xCA
+#[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx512f")]
 unsafe fn ch(e: __m512i, f: __m512i, g: __m512i) -> __m512i {
@@ -67,6 +72,7 @@ unsafe fn ch(e: __m512i, f: __m512i, g: __m512i) -> __m512i {
 }
 
 /// Maj(a,b,c) = (a & b) ^ (a & c) ^ (b & c)  — ternarylogic 0xE8
+#[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx512f")]
 unsafe fn maj(a: __m512i, b: __m512i, c: __m512i) -> __m512i {
@@ -76,6 +82,7 @@ unsafe fn maj(a: __m512i, b: __m512i, c: __m512i) -> __m512i {
 /// Build the u32 byte-reversal shuffle mask ([3,2,1,0] within each 4-byte group)
 ///
 /// Used for LE ↔ BE conversion; shared by `load_be_word_simd` and result extraction.
+#[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx512f", enable = "avx512bw")]
 unsafe fn bswap_mask_epi32() -> __m512i {
@@ -90,7 +97,7 @@ unsafe fn bswap_mask_epi32() -> __m512i {
 ///
 /// Uses a SIMD byte shuffle instead of 16 scalar `u32::from_be_bytes` calls.
 /// Note: `hash_40_x16` now uses `_mm512_i32gather_epi32`; this function is retained for testing.
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 #[inline]
 #[target_feature(enable = "avx512f", enable = "avx512bw")]
 unsafe fn load_be_word_simd(inputs: &[[u8; 40]; 16], offset: usize) -> __m512i {
@@ -128,6 +135,7 @@ fn precompute_constant_words(model_bytes: &[u8; 16], sv_bytes: &[u8; 4]) -> [u32
 /// # Safety
 ///
 /// The caller must ensure the CPU supports AVX-512F + AVX-512BW.
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f", enable = "avx512bw")]
 pub unsafe fn hash_40_x16(inputs: &[[u8; 40]; 16], const_w5_9: &[u32; 5]) -> SimdResult {
     // Shared bswap mask (L5: hoisted for reuse)

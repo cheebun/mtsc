@@ -1,4 +1,38 @@
-# hap_ac2-7.16.1.bin — Analysis Notes
+# hap-ac2 dumps — Analysis Notes
+
+## Additional dumps (2026-09-03)
+
+Two more distinct hAP ac² SPI dumps, from a different public source than the original
+analyzed one below:
+
+- `hap_ac2-boby.wang.bin` -- 16,777,216 bytes, ELF 32-bit LSB/ARM/EABI5 (same shape as
+  the original). Source: https://www.right.com.cn/forum/thread-8361516-1-3.html
+  (poster boby.wang, 2024-4-3). The thread shared two files named `hAP ac2.bin`/
+  `hAP ac2-2.bin` -- both downloaded copies were byte-identical (same MD5), so only one
+  is kept here.
+- `hap_ac2_rbd52g.bin` -- 16,777,216 bytes, ELF 32-bit LSB/ARM/EABI5, **distinct**
+  content from both the above and the original `hap_ac2-7.16.1.bin` (different MD5 from
+  both). Same source thread; `RBD52G` in the filename likely refers to the board
+  revision/model. Not yet diffed against the other two dumps to characterize what
+  differs.
+
+None of these three dumps (`hap_ac2-7.16.1.bin`, `hap_ac2-boby.wang.bin`,
+`hap_ac2_rbd52g.bin`) share an MD5 with each other.
+
+### Notable finding: flash chip brand affects device ID stability
+
+The source thread includes a specific hardware warning directly relevant to this
+project's identity/licensing research: **"flash芯片不能用MX的，刷了以后每次重启生成不
+一样的ID"** (don't use MX-brand flash chips -- after flashing, the device generates a
+*different* ID on every reboot); the poster recommends Winbond chips instead. This
+implies part of the device's identity is derived from something read off the flash chip
+itself at boot (unique ID region, timing, or similar chip-specific behavior) rather than
+being a fixed value burned in once -- a concrete, not-yet-investigated lead for
+understanding how ARM RouterBoard devices in this family derive their board identity,
+separate from (and possibly more informative than) the x86/CHR MBR mechanism this
+project has otherwise focused on. Not yet followed up on.
+
+## hap_ac2-7.16.1.bin — Analysis Notes
 
 Analysis of a full flash dump from a real hAP ac² device (2026-08-31).
 

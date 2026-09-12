@@ -35,10 +35,10 @@ MTBase64 encode/decode was obtained from the MTLic project. Key text was found t
 
 All of Phases 1-5 were verified exclusively against `ide0`-attached disks. Applying a verified `serial=`/`model=` combo to a `scsi0`/`virtio-scsi-pci` disk produces a **different** SOFTWARE ID for the identical parameters. Reverse-engineering both the ARM32 (`nova/bin/keyman` from a RouterOS ARM64 image) and x86 (`keyman_x86_7.23.2`) binaries traced this to `keyman` using an entirely different hardware-identification code path depending on how the disk is presented to the guest kernel:
 
-- `ide0` and `sata0`/AHCI: both are backed by QEMU's `ide-hd` device model (`sata0` is just `ide-hd` on an AHCI controller instead of legacy PIIX/ISA IDE) -- `ioctl(HDIO_DRIVE_CMD)` succeeds -> real ATA IDENTIFY data is used (Phases 1-5's basis). Confirmed identical encoding for both via exact `-b ide` SOFTWARE ID match and empirical activation of an existing `ide0` collision-database entry on a fresh `sata0` install (§8.20).
+- `ide0` and `sata0`/AHCI: both are backed by QEMU's `ide-hd` device model (`sata0` is just `ide-hd` on an AHCI controller instead of legacy PIIX/ISA IDE) -- `ioctl(HDIO_DRIVE_CMD)` succeeds -> real ATA IDENTIFY data is used (Phases 1-5's basis). Confirmed identical encoding for both via exact `--bus ide` SOFTWARE ID match and empirical activation of an existing `ide0` collision-database entry on a fresh `sata0` install (§8.20).
 - `scsi0`/`virtio-scsi-pci`: backed by QEMU's `scsi-hd` device instead, so that ioctl fails, falling through to `ioctl(SG_IO)` -- standard SCSI INQUIRY (model) + EVPD page 0x80 Unit Serial Number (serial) -- and, critically, `sector_val` is **always `0`** on this path regardless of the disk's actual size (empirically confirmed at both 1GiB and 2GiB)
 
-`ros-serialgen search`/`check` gained a `-b`/`--bus <ide|scsi>` flag for this -- `ide` covers both `ide0` and `sata0`/AHCI, `scsi` covers `scsi0`/`virtio-scsi-pci` only. `scsi0` activation was confirmed to work end-to-end on x86_64 (fresh install, standard PVE-default SMBIOS, single boot -> `nlevel: 6`). On ARM64 specifically, a separate QEMU/KVM-virtualization-detection code path in `keyman` (triggered by the guest's `board` environment variable) can additionally interfere with license *signature* validation even when the SOFTWARE ID itself is computed correctly -- this remains only partially understood. Full details, including the disassembly evidence, are in [license-internals.md §8](../investigation/license-internals.md#8-arm32-keyman-on-virtio-scsi-a-platform-specific-investigation).
+`mtsc search`/`check` expose `--bus <ide|scsi|nvme>` -- `ide` covers both `ide0` and `sata0`/AHCI, `scsi` covers `scsi0`/`virtio-scsi-pci` only, and `nvme` uses the same size-dependent rounding as `ide`. SCSI can omit `--disk-size` when `--model` is explicit. `scsi0` activation was confirmed to work end-to-end on x86_64 (fresh install, standard PVE-default SMBIOS, single boot -> `nlevel: 6`). On ARM64 specifically, a separate QEMU/KVM-virtualization-detection code path in `keyman` (triggered by the guest's `board` environment variable) can additionally interfere with license *signature* validation even when the SOFTWARE ID itself is computed correctly -- this remains only partially understood. Full details, including the disassembly evidence, are in [license-internals.md §8](../investigation/license-internals.md#8-arm32-keyman-on-virtio-scsi-a-platform-specific-investigation).
 
 ---
 
@@ -106,7 +106,7 @@ Offset       Size   Purpose                          Notes
 -----------  -----  -------------------------------  --------------------------
 0x0B3-0x0FF  77B    MBR random bytes                 All zeros in our scheme
 0x100-0x109  10B    License identity seed             Participates in SOFTWARE ID
-0x10A-0x10B   2B    License marker                   Must be BD E8 (installer resets to FF FF)
+0x10A-0x10B   2B    License marker                   Derived from identity; BD E8 for all zeros
 0x10C-0x10F   4B    System counter                   Incremented each boot; no impact
 0x110-0x14F  64B    KCDSA signature                  The actual license proof
 ```
@@ -118,6 +118,8 @@ The identity region (`0x100-0x10F`) and signature region (`0x110-0x14F`) are fun
 ## 4. Collision Search Mechanism
 
 ### Probability Analysis
+
+The estimates below describe the original **fixed-identity** search, not current default sweep throughput. Current `mtsc search` without `--identity` checks all 2048 `mbr_val` values per candidate hash and supports `--alphabet`/`--pad`; startup calibration selects among all supported CPU backends with backend-owned batches. See [command reference](command-reference.md) and [SHA-256 backends](sha256-backends.md). To retain the original all-zero identity/zero-padding convention, use `--identity 00000000000000000000 --pad start`.
 
 ```
 SOFTWARE ID space:  ~40 bits

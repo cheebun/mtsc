@@ -10,3 +10,8 @@ Cargo.lock
 /keys/
 /docs/mbr-data.md
 /archive/
+chr-license-data.md
+chr-system-id-formula.md
+keys.toml
+/backup/
+/logs/
