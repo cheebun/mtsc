@@ -76,6 +76,22 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check   # format check
 ```
 
+## Testing
+
+- `cargo test --release` — 110 tests passed, 1 ignored (`main::tests::test_real_disk_all_targets_sweep_vs_feasibility_check_agree`, a heavy/optional sweep-vs-feasibility cross-check, needs a local `keys.toml`), 0 failed as of 2026-09-13.
+- `main::tests::test_hash_engine_self_check_passes_for_every_supported_backend` / `test_hash_batch_matches_scalar_reference_extra_patterns` — cross-validate every `HashEngine` backend the CPU actually supports against the scalar reference; this makes `sha256_backend.rs`'s runtime `HashEngine::self_check()` (already called from `auto_for_threads` before real work) also run under `cargo test`/CI.
+- **Known coverage gap**: `HashEngine::supported()` is architecture-gated, so the above tests only exercise whatever backends match the machine `cargo test` runs on. `scalar`/`sha-ni`/`avx2`/`avx512` are real-hardware-verified on x86_64 CI (confirmed on an AVX-512F/BW + SHA-NI + AVX2 host). `arm-sha2`/`neon` have only been verified once, manually, via QEMU user-mode emulation (`aarch64-unknown-linux-gnu` cross-compiled, run under `qemu-aarch64-static -cpu max`) during PR #5's review — **not on real ARM hardware, and not wired into any CI job** (`.github/workflows/build-release.yml`'s `build` job builds/lints the three aarch64 targets but never runs `cargo test` for them). Treat `arm-sha2`/`neon` as unverified-by-CI until an aarch64 test runner (or emulated CI step) is added.
+- `sha256::tests::test_6g_known_hash` — 6G VMware known hash value
+- `software_id::tests::test_encode_decode_roundtrip` — encode/decode roundtrip
+- `software_id::tests::test_decode_invalid_char` — invalid character error
+- `software_id::tests::test_round_sectors` — 5 rounding verification cases
+- `convert::tests::test_roundtrip_synthetic` — sig ↔ key conversion verification
+- `main::tests` — disk size parsing/validation, write_candidate/increment_candidate (default + custom `--alphabet`), software_id, model, input_buf, check_match, E2E, identity parsing/mix resolution
+- `targets::tests` — `mix_from_identity` (matches standard for all-zero, deterministic, differs for non-zero)
+- `curve25519::tests` — EC-KCDSA verify against `TI09-7WK3`'s real, hardware-activation-confirmed
+  signature (must return `true`), plus rejection tests for a tampered signature/payload/wrong
+  public key (must return `false`) -- see `docs/investigation/license-internals.md` §8.32
+
 ## Documentation Style
 
 - Command-line examples in `docs/` and `AGENTS.md` use **long-form flags** (`--disk-size`, not `-s`) for readability -- short flags are fine in interactive/muscle-memory use but obscure meaning for a reader seeing the command cold.

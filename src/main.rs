@@ -2552,6 +2552,21 @@ mod tests {
     // reference at runtime (called from `auto_for_threads` before real work starts) -- these
     // tests just make that mechanism also run under `cargo test`/CI, so a broken new backend
     // fails the build instead of only being caught the first time it runs in production.
+    //
+    // KNOWN COVERAGE GAP (as of 2026-09-13): `HashEngine::supported()` is architecture-gated
+    // (`#[cfg(target_arch = ...)]` in sha256_backend.rs), so these tests only ever exercise
+    // whatever backends match the machine `cargo test` actually runs on. On x86_64 CI that's
+    // scalar/sha-ni/avx2/avx512 -- real hardware execution, confirmed on hkg-land-03
+    // (AVX-512F/BW + SHA-NI + AVX2). `arm-sha2`/`neon` have ONLY been verified once, manually,
+    // via QEMU user-mode emulation (`aarch64-unknown-linux-gnu` cross-compiled, run under
+    // `qemu-aarch64-static -cpu max`) during this PR's review -- not on real ARM hardware, and
+    // not wired into any CI job (`.github/workflows/build-release.yml`'s `build` job runs
+    // `clippy`/`cargo build` for `aarch64-unknown-linux-gnu`/`aarch64-pc-windows-msvc`/
+    // `aarch64-apple-darwin` but never `cargo test` for any of them). Until CI actually runs
+    // this test suite on an aarch64 runner (or under an aarch64 emulator), a broken
+    // `arm-sha2`/`neon` kernel would only be caught by a real user hitting `self_check`'s
+    // runtime error on real hardware -- treat these two backends as unverified-by-CI, not
+    // "tested," until that gap is closed.
 
     #[test]
     fn test_hash_engine_supported_always_includes_scalar() {
