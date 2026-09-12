@@ -4,7 +4,7 @@ A CLI tool that computes a valid RouterOS serial number from an existing license
 
 ## Features
 
-- **AVX-512 SIMD acceleration**: computes 16 SHA-256 hashes per batch (auto-detected at runtime, falls back to scalar when unsupported)
+- **CPU-selected SHA-256 backends**: scalar, SHA-NI x1/x2/x4, AVX2 x8, AVX-512 x16, ARM SHA2 x1/x2/x4, and NEON x4. Startup detects support and calibrates once at the requested thread count; no feature detection occurs in the hashing loop.
 - **Hand-implemented MikroTik crypto primitives**: SHA-256 and MTBase64 have no MikroTik-compatible library equivalent, so both are hand-implemented; standard Curve25519 EC-KCDSA verification uses the audited `curve25519-dalek` crate instead of hand-rolled field/point arithmetic (see `docs/investigation/license-internals.md` §8.32 for why)
 - **External key configuration**: add new signatures via `keys.toml` without recompiling
 - **Resume search**: `--from` parameter resumes from a saved progress point
@@ -13,12 +13,27 @@ A CLI tool that computes a valid RouterOS serial number from an existing license
 ## Build
 
 ```bash
-# Recommended: enable native CPU instructions (AVX-512, etc.)
-RUSTFLAGS='-C target-cpu=native' cargo build --release
-
-# Generic build
+# Portable build: individual kernels enable only their required CPU features
 cargo build --release
+
+# Optional machine-local build; do not distribute it to older CPUs
+RUSTFLAGS='-C target-cpu=native' cargo build --release
 ```
+
+## CI and downloads
+
+GitHub Actions builds and tests native **Linux, Windows, and macOS**, each on
+**x86_64 and ARM64**. Every build compiles the benchmark without running timings,
+checks the calculation library with Clippy, and uploads a platform archive with
+a SHA-256 checksum. Apple Silicon also tests explicit generic-CPU detection.
+
+Branch pushes, pull requests to `main`, and manual workflow dispatch run CI.
+Tags such as `v0.3.0`, `0.3.0`, or `v0.3.0-rc.1` publish all six platform
+archives to a GitHub Release only after version validation, all builds, and
+formatting checks pass. Release tags must use a filename-safe
+`[v]MAJOR.MINOR.PATCH[-prerelease][+build]` form. Linux archives
+use GNU libc; musl, 32-bit, mobile, and WebAssembly targets are not included.
+Builds use the portable target defaults, not `target-cpu=native`.
 
 ## Usage
 
@@ -130,6 +145,13 @@ More keys = faster search (linear speedup).
 ├── CLAUDE.md / AGENTS.md    AI tool instructions
 ├── src/
 │   ├── main.rs              CLI entry + multi-threaded search engine + unit tests
+│   ├── lib.rs               Reusable calculation layer for CLI and benchmarks
+│   ├── sha256_backend.rs    CPU dispatch, startup calibration, dynamic batch owner
+│   ├── sha256_cpu.rs        AArch64 detection and macOS sysctl compatibility
+│   ├── sha256_shani.rs      SHA-NI x1/x2/x4 multi-buffer kernels
+│   ├── sha256_avx2.rs       AVX2 x8 kernel
+│   ├── sha256_arm.rs        ARM SHA2 x1/x2/x4 kernels
+│   ├── sha256_neon.rs       NEON x4 kernel
 │   ├── sha256_constants.rs  MikroTik SHA-256 shared constants (IV + K)
 │   ├── sha256.rs            MikroTik custom SHA-256 (scalar, production)
 │   ├── sha256_simd.rs       AVX-512 SIMD 16-way parallel SHA-256
@@ -149,17 +171,22 @@ More keys = faster search (linear speedup).
 
 ## Performance
 
-| Environment | Engine | Speed | Search time (4 targets) |
-|---|---|---|---|
-| 8-core AVX-512 | SIMD x16 | ~2000M hash/s | ~1-2 hours |
-| 8-core, no AVX-512 | Scalar | ~100M hash/s | ~20+ hours |
+Benchmark the actual machine rather than inferring performance from SIMD width:
 
-SIMD optimization highlights:
-- `_mm512_i32gather_epi32` replaces scalar gathering
-- Circular buffer W[16] fuses message schedule with compression (4KB→1KB stack)
-- `_mm512_ternarylogic_epi32` single-instruction Ch/Maj
-- BCD incremental counter avoids heap allocation
-- sid_hi lookup pre-filter skips 99.99% of non-matching batches
+```bash
+cargo bench --bench hash_backends -- --threads 1 --seconds 1 --samples 5 --warmup 0.3
+cargo bench --bench hash_backends -- --mode serial --threads 16 --seconds 1 --samples 5 --warmup 0.3
+```
+
+On the tested Ryzen 7 5800H, SHA-NI multi-buffer beats AVX2 x8. On Apple M4,
+ARM SHA2 beats NEON x4. The best hardware-SHA buffer count depends on thread
+count; startup calibration tests the requested concurrency. AVX-512 remains
+available on CPUs that support it, but neither tested machine provides it.
+
+See [backend design and benchmark options](docs/reference/sha256-backends.md)
+and [measured performance summary](docs/benchmarks/README.md). Hash-kernel
+throughput and serial-preparation throughput are reported separately; neither
+is a claim of full application search speed or expected collision time.
 
 ## Testing
 

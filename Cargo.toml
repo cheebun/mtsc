@@ -9,6 +9,14 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 curve25519-dalek = "4"
 
+[[bench]]
+name = "hash_backends"
+harness = false
+
 [profile.release]
+opt-level = 3
+lto = true
+
+[profile.bench]
 opt-level = 3
 lto = true

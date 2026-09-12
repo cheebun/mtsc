@@ -1,15 +1,15 @@
 //! RouterOS L6 Serial Generator — computes serials from existing licenses + key conversion tool
 //!
-//! Supports AVX-512 SIMD acceleration: computes 16 SHA-256 hashes per batch,
-//! auto-detected at runtime with fallback to the scalar implementation.
+//! Selects a CPU-supported SHA-256 backend once at startup; each backend owns
+//! its batch size, with portable scalar calculation retained as the reference.
 
 mod convert;
 mod curve25519;
-mod sha256;
 mod sha256_constants;
+use ros_serialgen::sha256;
 #[cfg(test)]
-mod sha256_scalar;
-mod sha256_simd;
+use ros_serialgen::sha256_backend::precompute_constant_words;
+use ros_serialgen::sha256_backend::{HashBatch, HashEngine};
 mod software_id;
 mod targets;
 
@@ -31,8 +31,6 @@ const SERIAL_LEN: usize = 20;
 const MODEL_LEN: usize = 16;
 /// Total SHA-256 input length: serial(20) + model(16) + sector_val(4)
 const INPUT_LEN: usize = SERIAL_LEN + MODEL_LEN + 4;
-/// Number of lanes computed in parallel per SIMD batch
-const SIMD_LANES: usize = 16;
 /// Progress report interval (every 10,000M = 10 billion hashes)
 const PROGRESS_INTERVAL: u64 = 10_000_000_000;
 
@@ -474,7 +472,10 @@ fn cmd_search(
     });
     let (mix_lo, mix_hi) = resolve_mix(identity.as_deref());
     let raw_targets = targets::load_targets(keys.as_deref(), (mix_lo, mix_hi));
-    let use_simd = sha256_simd::is_avx512_supported();
+    let engine = HashEngine::auto_for_threads(num_threads).unwrap_or_else(|error| {
+        eprintln!("FATAL: {error}");
+        std::process::exit(1);
+    });
     let start_serial = from * 1_000_000;
 
     verify_6g(&raw_targets);
@@ -486,7 +487,7 @@ fn cmd_search(
         &raw_targets,
         count,
         start_serial,
-        use_simd,
+        engine,
         identity.as_deref(),
         bus,
     );
@@ -507,11 +508,7 @@ fn cmd_search(
         .map(|tid| {
             let ctx = Arc::clone(&ctx);
             thread::spawn(move || {
-                if use_simd {
-                    unsafe { search_simd(tid, num_threads, start_serial, &ctx) };
-                } else {
-                    search_scalar(tid, num_threads, start_serial, &ctx);
-                }
+                search_batch(tid, num_threads, start_serial, &ctx, engine);
             })
         })
         .collect();
@@ -537,7 +534,7 @@ fn print_search_banner(
     targets: &[targets::Target],
     count: usize,
     start_serial: u64,
-    use_simd: bool,
+    engine: HashEngine,
     identity: Option<&str>,
     bus: BusType,
 ) {
@@ -546,7 +543,6 @@ fn print_search_banner(
     } else {
         format!("find {}", count)
     };
-    let engine = if use_simd { "AVX-512 x16" } else { "scalar" };
 
     println!("=== RouterOS L6 Serial Generator ===");
     println!(
@@ -601,64 +597,24 @@ fn print_search_banner(
 
 // ---- Search engines ----
 
-/// Scalar search (no SIMD, computes one hash at a time)
-fn search_scalar(tid: usize, num_threads: usize, start_serial: u64, ctx: &SearchContext) {
-    let mut buf = build_input_buf(&[b'0'; SERIAL_LEN], &ctx.model_bytes, &ctx.sv_bytes);
-    let step = num_threads as u64;
-    let mut i: u64 = start_serial + tid as u64;
-
-    // sid_hi pre-filter table: most hashes never enter check_match
-    let mut hi_lookup = [false; 256];
-    for t in ctx.targets.iter() {
-        hi_lookup[t.need_hi as usize] = true;
-    }
-
-    loop {
-        if ctx.stop.load(Ordering::Relaxed) {
-            return;
-        }
-
-        write_serial((&mut buf[..SERIAL_LEN]).try_into().unwrap(), i);
-        let (sid_lo, sid_hi) = sha256::hash_40(&buf);
-
-        if hi_lookup[sid_hi as usize] {
-            check_match(i, sid_lo, sid_hi, ctx);
-        }
-
-        i += step;
-
-        if tid == 0 && (i / PROGRESS_INTERVAL) != ((i - step) / PROGRESS_INTERVAL) {
-            report_progress(i, &ctx.start, &ctx.found_count);
-        }
-    }
-}
-
-/// AVX-512 SIMD search (computes 16 serials in parallel per batch)
-///
-/// # Safety
-///
-/// The caller must ensure the CPU supports AVX-512F.
-#[target_feature(enable = "avx512f", enable = "avx512bw")]
-unsafe fn search_simd(tid: usize, num_threads: usize, start_serial: u64, ctx: &SearchContext) {
-    let batch = SIMD_LANES as u64;
+/// Search with a previously selected backend and its native batch size.
+fn search_batch(
+    tid: usize,
+    num_threads: usize,
+    start_serial: u64,
+    ctx: &SearchContext,
+    engine: HashEngine,
+) {
+    let mut hashes = HashBatch::new(engine, &ctx.model_bytes, &ctx.sv_bytes);
+    let batch = hashes.len() as u64;
     let step = (num_threads as u64) * batch;
-    let mut base: u64 = start_serial + (tid as u64) * batch;
-
-    // W[5..9] precomputation: model + sector_val are constant, compute once
-    let const_w = sha256_simd::precompute_constant_words(&ctx.model_bytes, &ctx.sv_bytes);
-
-    // Pre-fill model + sector_val for all 16 inputs (once, outside the loop)
-    let mut inputs = [[SPACE_PADDING; INPUT_LEN]; SIMD_LANES];
-    for lane in 0..SIMD_LANES {
-        inputs[lane][SERIAL_LEN..SERIAL_LEN + MODEL_LEN].copy_from_slice(&ctx.model_bytes);
-        inputs[lane][SERIAL_LEN + MODEL_LEN..].copy_from_slice(&ctx.sv_bytes);
-    }
+    let mut base: u64 = start_serial.wrapping_add((tid as u64) * batch);
 
     // BCD counter
     let mut base_serial = [b'0'; SERIAL_LEN];
     write_serial(&mut base_serial, base);
 
-    // sid_hi pre-filter table: most batches have no match, skipping check_match for all 16 lanes
+    // sid_hi pre-filter table: most batches have no match.
     let mut hi_lookup = [false; 256];
     for t in ctx.targets.iter() {
         hi_lookup[t.need_hi as usize] = true;
@@ -669,28 +625,28 @@ unsafe fn search_simd(tid: usize, num_threads: usize, start_serial: u64, ctx: &S
             return;
         }
 
-        // Generate 16 consecutive serials via BCD
-        let mut serials = [0u64; SIMD_LANES];
         let mut lane_serial = base_serial;
-        for lane in 0..SIMD_LANES {
-            serials[lane] = base + lane as u64;
-            inputs[lane][..SERIAL_LEN].copy_from_slice(&lane_serial);
-            increment_bcd(&mut lane_serial);
-        }
-
-        // 16-way parallel SHA-256
-        let result = sha256_simd::hash_40_x16(&inputs, &const_w);
-
-        // Check each lane for a match
-        for lane in 0..SIMD_LANES {
-            if hi_lookup[result.sid_hi[lane] as usize] {
-                check_match(serials[lane], result.sid_lo[lane], result.sid_hi[lane], ctx);
+        for lane in 0..hashes.len() {
+            hashes.serial_mut(lane).copy_from_slice(&lane_serial);
+            if base.wrapping_add(lane as u64) == u64::MAX {
+                lane_serial.fill(b'0');
+            } else {
+                increment_bcd(&mut lane_serial);
             }
         }
 
-        base += step;
-        // BCD stepping is faster than 20 divisions (step is usually < 256)
-        if step <= 256 {
+        hashes.hash();
+
+        for (lane, &(sid_lo, sid_hi)) in hashes.outputs().iter().enumerate() {
+            if hi_lookup[sid_hi as usize] {
+                check_match(base.wrapping_add(lane as u64), sid_lo, sid_hi, ctx);
+            }
+        }
+
+        let previous_base = base;
+        base = base.wrapping_add(step);
+        // Keep decimal and numeric counters identical even when u64 wraps.
+        if step <= 256 && base >= previous_base {
             for _ in 0..step {
                 increment_bcd(&mut base_serial);
             }
@@ -698,7 +654,7 @@ unsafe fn search_simd(tid: usize, num_threads: usize, start_serial: u64, ctx: &S
             write_serial(&mut base_serial, base);
         }
 
-        if tid == 0 && (base / PROGRESS_INTERVAL) != ((base - step) / PROGRESS_INTERVAL) {
+        if tid == 0 && (base / PROGRESS_INTERVAL) != (previous_base / PROGRESS_INTERVAL) {
             report_progress(base, &ctx.start, &ctx.found_count);
         }
     }
@@ -950,11 +906,10 @@ fn cmd_verify() {
         ("00000000000000000001", "VMware Virtual I", 0x1800u32),
         ("00000000202155543391", "ROS16G          ", 0x4000),
     ];
-    let engine = if sha256_simd::is_avx512_supported() {
-        "AVX-512 x16"
-    } else {
-        "scalar"
-    };
+    let engine = HashEngine::auto().unwrap_or_else(|error| {
+        eprintln!("FATAL: {error}");
+        std::process::exit(1);
+    });
 
     println!("=== Verify (engine: {}) ===", engine);
     for (ser, model_str, sv) in &cases {
@@ -1401,6 +1356,64 @@ mod tests {
         assert!(ctx.stop.load(Ordering::Relaxed));
     }
 
+    #[test]
+    fn test_search_batch_all_backends_and_thread_offsets() {
+        for engine in HashEngine::supported() {
+            for num_threads in [1, 3, 257] {
+                for tid in [0, num_threads - 1] {
+                    for start_serial in [9_999_999_990_u64, u64::MAX - 2] {
+                        for batch_index in [0, 3] {
+                            let offset = ((batch_index * num_threads + tid) * engine.batch_size()
+                                + engine.batch_size()
+                                - 1) as u64;
+                            let serial_num = start_serial.wrapping_add(offset);
+                            let mut serial = [0; SERIAL_LEN];
+                            write_serial(&mut serial, serial_num);
+                            let model = *b"VMware Virtual I";
+                            let sv = 0x1800u32.to_le_bytes();
+                            let (sid_lo, sid_hi) =
+                                sha256::hash_40(&build_input_buf(&serial, &model, &sv));
+                            let mut ctx = make_test_ctx(vec![targets::Target {
+                                need_lo: sid_lo,
+                                need_hi: sid_hi,
+                                name: "synthetic backend regression".to_string(),
+                                signature_hex: String::new(),
+                            }]);
+                            ctx.model_bytes = model;
+                            ctx.sv_bytes = sv;
+                            ctx.max_collisions = 1;
+                            let ctx = Arc::new(ctx);
+                            let worker_ctx = Arc::clone(&ctx);
+                            let (done_tx, done_rx) = std::sync::mpsc::channel();
+                            let worker = thread::spawn(move || {
+                                search_batch(tid, num_threads, start_serial, &worker_ctx, engine);
+                                let _ = done_tx.send(());
+                            });
+                            let done = done_rx.recv_timeout(std::time::Duration::from_secs(3));
+                            ctx.stop.store(true, Ordering::Relaxed);
+                            worker.join().unwrap();
+                            assert!(
+                                done.is_ok(),
+                                "{engine}: search mapping did not reach expected target"
+                            );
+                            assert_eq!(ctx.found_count.load(Ordering::Relaxed), 1, "{engine}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_search_batch_honors_preexisting_stop() {
+        for engine in HashEngine::supported() {
+            let ctx = make_test_ctx(vec![]);
+            ctx.stop.store(true, Ordering::Relaxed);
+            search_batch(0, 1, 0, &ctx, engine);
+            assert_eq!(ctx.found_count.load(Ordering::Relaxed), 0);
+        }
+    }
+
     // ---- End-to-end SOFTWARE ID ----
 
     #[test]
@@ -1436,7 +1449,7 @@ mod tests {
     fn test_precompute_constant_words() {
         let model = b"VMware Virtual I";
         let sv_bytes = 0x1800u32.to_le_bytes();
-        let words = sha256_simd::precompute_constant_words(model, &sv_bytes);
+        let words = precompute_constant_words(model, &sv_bytes);
 
         assert_eq!(words[0], u32::from_be_bytes([b'V', b'M', b'w', b'a']));
         assert_eq!(words[1], u32::from_be_bytes([b'r', b'e', b' ', b'V']));

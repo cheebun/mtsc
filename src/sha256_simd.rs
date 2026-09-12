@@ -112,15 +112,9 @@ unsafe fn load_be_word_simd(inputs: &[[u8; 40]; 16], offset: usize) -> __m512i {
 /// Precompute the W[5..9] constants (big-endian u32) corresponding to model + sector_val
 ///
 /// Returns 5 u32 values for `hash_40_x16`, avoiding recomputation per batch.
-pub fn precompute_constant_words(model_bytes: &[u8; 16], sv_bytes: &[u8; 4]) -> [u32; 5] {
-    let mut buf = [0u8; 20];
-    buf[..16].copy_from_slice(model_bytes); // model already includes space padding
-    buf[16..20].copy_from_slice(sv_bytes);
-    let mut words = [0u32; 5];
-    for i in 0..5 {
-        words[i] = u32::from_be_bytes([buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], buf[i * 4 + 3]]);
-    }
-    words
+#[cfg(test)]
+fn precompute_constant_words(model_bytes: &[u8; 16], sv_bytes: &[u8; 4]) -> [u32; 5] {
+    crate::sha256_backend::precompute_constant_words(model_bytes, sv_bytes)
 }
 
 /// Compute MikroTik custom SHA-256 on 16 groups of 40-byte inputs simultaneously.
@@ -147,11 +141,11 @@ pub unsafe fn hash_40_x16(inputs: &[[u8; 40]; 16], const_w5_9: &[u32; 5]) -> Sim
     let stride_indices = _mm512_setr_epi32(
         0, 40, 80, 120, 160, 200, 240, 280, 320, 360, 400, 440, 480, 520, 560, 600,
     );
-    for word_idx in 0..5 {
+    for (word_idx, word) in w[..5].iter_mut().enumerate() {
         let offset_vec = _mm512_set1_epi32((word_idx * 4) as i32);
         let indices = _mm512_add_epi32(stride_indices, offset_vec);
         let gathered = _mm512_i32gather_epi32::<1>(indices, base_ptr as *const i32);
-        w[word_idx] = _mm512_shuffle_epi8(gathered, bswap);
+        *word = _mm512_shuffle_epi8(gathered, bswap);
     }
 
     // W[5..9]: constant broadcast
@@ -225,8 +219,8 @@ pub unsafe fn hash_40_x16(inputs: &[[u8; 40]; 16], const_w5_9: &[u32; 5]) -> Sim
         sid_hi: [0u8; 16],
     };
 
-    for lane in 0..16 {
-        result.sid_hi[lane] = (b_vals[lane] >> 24) as u8;
+    for (sid_hi, b) in result.sid_hi.iter_mut().zip(b_vals) {
+        *sid_hi = (b >> 24) as u8;
     }
 
     result
@@ -306,11 +300,11 @@ mod tests {
         let const_w = precompute_constant_words(model, &sv_bytes);
 
         let mut inputs = [[0x20u8; 40]; 16];
-        for lane in 0..16 {
+        for (lane, input) in inputs.iter_mut().enumerate() {
             let serial = format!("{:020}", lane);
-            inputs[lane][..20].copy_from_slice(serial.as_bytes());
-            inputs[lane][20..36].copy_from_slice(model);
-            inputs[lane][36..40].copy_from_slice(&sv_bytes);
+            input[..20].copy_from_slice(serial.as_bytes());
+            input[20..36].copy_from_slice(model);
+            input[36..40].copy_from_slice(&sv_bytes);
         }
 
         let result = unsafe { hash_40_x16(&inputs, &const_w) };
