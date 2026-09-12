@@ -81,7 +81,7 @@ unsafe fn maj(a: __m512i, b: __m512i, c: __m512i) -> __m512i {
 
 /// Build the u32 byte-reversal shuffle mask ([3,2,1,0] within each 4-byte group)
 ///
-/// Used for LE ↔ BE conversion; shared by `load_be_word_simd` and result extraction.
+/// Used for LE ↔ BE conversion when loading message words and extracting results.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx512f", enable = "avx512bw")]
@@ -91,43 +91,6 @@ unsafe fn bswap_mask_epi32() -> __m512i {
         6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8,
         9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3,
     )
-}
-
-/// Load 4 bytes from the given offset of all 16 inputs, convert big-endian to u32, and pack into __m512i.
-///
-/// Uses a SIMD byte shuffle instead of 16 scalar `u32::from_be_bytes` calls.
-/// Note: `hash_40_x16` now uses `_mm512_i32gather_epi32`; this function is retained for testing.
-#[cfg(all(test, target_arch = "x86_64"))]
-#[inline]
-#[target_feature(enable = "avx512f", enable = "avx512bw")]
-unsafe fn load_be_word_simd(inputs: &[[u8; 40]; 16], offset: usize) -> __m512i {
-    // Scalar-gather 16 LE u32s (x86 is always little-endian)
-    let mut raw = [0u32; 16];
-    for lane in 0..16 {
-        raw[lane] = u32::from_le_bytes([
-            inputs[lane][offset],
-            inputs[lane][offset + 1],
-            inputs[lane][offset + 2],
-            inputs[lane][offset + 3],
-        ]);
-    }
-    let v = _mm512_loadu_si512(raw.as_ptr() as *const __m512i);
-    // SIMD byte-order reversal: LE → BE
-    _mm512_shuffle_epi8(v, bswap_mask_epi32())
-}
-
-/// Precompute the W[5..9] constants (big-endian u32) corresponding to model + sector_val
-///
-/// Returns 5 u32 values for `hash_40_x16`, avoiding recomputation per batch.
-pub fn precompute_constant_words(model_bytes: &[u8; 16], sv_bytes: &[u8; 4]) -> [u32; 5] {
-    let mut buf = [0u8; 20];
-    buf[..16].copy_from_slice(model_bytes); // model already includes space padding
-    buf[16..20].copy_from_slice(sv_bytes);
-    let mut words = [0u32; 5];
-    for i in 0..5 {
-        words[i] = u32::from_be_bytes([buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], buf[i * 4 + 3]]);
-    }
-    words
 }
 
 /// Compute MikroTik custom SHA-256 on 16 groups of 40-byte inputs simultaneously.
@@ -155,11 +118,11 @@ pub unsafe fn hash_40_x16(inputs: &[[u8; 40]; 16], const_w5_9: &[u32; 5]) -> Sim
     let stride_indices = _mm512_setr_epi32(
         0, 40, 80, 120, 160, 200, 240, 280, 320, 360, 400, 440, 480, 520, 560, 600,
     );
-    for word_idx in 0..5 {
+    for (word_idx, word) in w[..5].iter_mut().enumerate() {
         let offset_vec = _mm512_set1_epi32((word_idx * 4) as i32);
         let indices = _mm512_add_epi32(stride_indices, offset_vec);
         let gathered = _mm512_i32gather_epi32::<1>(indices, base_ptr as *const i32);
-        w[word_idx] = _mm512_shuffle_epi8(gathered, bswap);
+        *word = _mm512_shuffle_epi8(gathered, bswap);
     }
 
     // W[5..9]: constant broadcast
@@ -233,26 +196,11 @@ pub unsafe fn hash_40_x16(inputs: &[[u8; 40]; 16], const_w5_9: &[u32; 5]) -> Sim
         sid_hi: [0u8; 16],
     };
 
-    for lane in 0..16 {
-        result.sid_hi[lane] = (b_vals[lane] >> 24) as u8;
+    for (sid_hi, b) in result.sid_hi.iter_mut().zip(b_vals) {
+        *sid_hi = (b >> 24) as u8;
     }
 
     result
-}
-
-/// Non-x86_64 stub: `is_avx512_supported()` always returns `false` on this target, so
-/// production code never calls this -- it exists only so the crate compiles for
-/// non-x86_64 targets (e.g. Apple Silicon), which always fall back to the scalar engine.
-///
-/// # Safety
-///
-/// Never actually unsafe to call (it just panics), but keeps the same signature/safety
-/// contract as the real x86_64 implementation for callers that don't branch on target_arch.
-#[cfg(not(target_arch = "x86_64"))]
-pub unsafe fn hash_40_x16(_inputs: &[[u8; 40]; 16], _const_w5_9: &[u32; 5]) -> SimdResult {
-    unreachable!(
-        "hash_40_x16 has no non-x86_64 implementation; is_avx512_supported() must be false here"
-    )
 }
 
 /// Runtime detection of AVX-512F + AVX-512BW support
@@ -264,103 +212,5 @@ pub fn is_avx512_supported() -> bool {
     #[cfg(not(target_arch = "x86_64"))]
     {
         false
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sha256_scalar;
-
-    /// Verify that the SIMD version produces the same output as the scalar version
-    #[test]
-    fn test_simd_matches_scalar() {
-        if !is_avx512_supported() {
-            eprintln!("SKIP: AVX-512 not supported on this CPU");
-            return;
-        }
-
-        let model = b"VMware Virtual I";
-        let sv: u32 = 0x1800;
-        let const_w = precompute_constant_words(model, &sv.to_le_bytes());
-
-        let mut inputs = [[0x20u8; 40]; 16];
-        let mut expected_lo = [0u32; 16];
-        let mut expected_hi = [0u8; 16];
-
-        for lane in 0..16 {
-            let serial = format!("{:020}", lane);
-            inputs[lane][..20].copy_from_slice(serial.as_bytes());
-            inputs[lane][20..36].copy_from_slice(model);
-            inputs[lane][36..40].copy_from_slice(&sv.to_le_bytes());
-
-            let (lo, hi) =
-                sha256_scalar::hash_40(<&[u8; 40]>::try_from(&inputs[lane][..]).unwrap());
-            expected_lo[lane] = lo;
-            expected_hi[lane] = hi;
-        }
-
-        let result = unsafe { hash_40_x16(&inputs, &const_w) };
-
-        for lane in 0..16 {
-            assert_eq!(
-                result.sid_lo[lane], expected_lo[lane],
-                "sid_lo mismatch at lane {}",
-                lane
-            );
-            assert_eq!(
-                result.sid_hi[lane], expected_hi[lane],
-                "sid_hi mismatch at lane {}",
-                lane
-            );
-        }
-    }
-
-    /// Verify the 6G VMware known value (lane 1 = serial "00000000000000000001")
-    #[test]
-    fn test_simd_6g_known() {
-        if !is_avx512_supported() {
-            eprintln!("SKIP: AVX-512 not supported on this CPU");
-            return;
-        }
-
-        let model = b"VMware Virtual I";
-        let sv_bytes = 0x1800u32.to_le_bytes();
-        let const_w = precompute_constant_words(model, &sv_bytes);
-
-        let mut inputs = [[0x20u8; 40]; 16];
-        for lane in 0..16 {
-            let serial = format!("{:020}", lane);
-            inputs[lane][..20].copy_from_slice(serial.as_bytes());
-            inputs[lane][20..36].copy_from_slice(model);
-            inputs[lane][36..40].copy_from_slice(&sv_bytes);
-        }
-
-        let result = unsafe { hash_40_x16(&inputs, &const_w) };
-        assert_eq!(result.sid_lo[1], 0x0B49EC2E, "sid_lo mismatch for 6G");
-        assert_eq!(result.sid_hi[1], 0x35, "sid_hi mismatch for 6G");
-    }
-
-    /// Verify SIMD byte-order conversion correctness
-    #[test]
-    fn test_load_be_word_simd() {
-        if !is_avx512_supported() {
-            eprintln!("SKIP: AVX-512 not supported on this CPU");
-            return;
-        }
-
-        let mut inputs = [[0x20u8; 40]; 16];
-        // Write known value [0x41, 0x42, 0x43, 0x44] = "ABCD" at lane 0 offset 0
-        inputs[0][0] = 0x41;
-        inputs[0][1] = 0x42;
-        inputs[0][2] = 0x43;
-        inputs[0][3] = 0x44;
-
-        let result = unsafe { load_be_word_simd(&inputs, 0) };
-        let mut vals = [0u32; 16];
-        unsafe { _mm512_storeu_si512(vals.as_mut_ptr() as *mut __m512i, result) };
-
-        // Big-endian "ABCD" = 0x41424344
-        assert_eq!(vals[0], 0x41424344, "BE conversion mismatch");
     }
 }

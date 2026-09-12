@@ -2,7 +2,7 @@
 
 A general-purpose checklist for code review and architecture decisions in Rust projects. Not every principle applies with equal force to every codebase -- several of the classic OO principles have little material weight in small, procedural Rust binaries, while carrying real weight in larger, multi-crate systems. Use judgment about which sections actually bite for the code under review; don't force a finding just to check a box against every principle.
 
-Part A covers general software-engineering and Rust-language *design* principles. Part B covers the operational/tooling side of the Rust ecosystem -- widely adopted community practices around dependencies, testing, error types, CI/CD, observability, and benchmarking.
+Part A covers general software-engineering and Rust-language *design* principles. Part B covers the operational/tooling side of the Rust ecosystem -- practices around dependencies, runtime verification, error types, CI/CD, observability, and benchmarking.
 
 ---
 
@@ -21,10 +21,10 @@ Part A covers general software-engineering and Rust-language *design* principles
 ## 2. SOLID Principles (Rust-Specific Notes)
 
 - **S -- Single Responsibility.** A module/struct should have one reason to change. Rust: keep `mod`/`struct`/`trait` boundaries aligned with one responsibility each, for high cohesion. A module whose name describes one job but whose contents serve two unrelated ones (e.g. encoding logic mixed with unrelated numeric rounding) is a straightforward split candidate.
-- **O -- Open/Closed.** Open for extension, closed for modification -- new behavior via new `trait` impls or generics, not by editing working code. Parameterizing an algorithm's constants (rather than hardcoding them) so a new variant becomes a new thin wrapper, not a change to the algorithm itself or its existing tests, is the idiomatic Rust shape of this principle.
+- **O -- Open/Closed.** Open for extension, closed for modification -- new behavior via new `trait` impls or generics, not by editing working code. Parameterizing an algorithm's constants (rather than hardcoding them) so a new variant becomes a new thin wrapper, not a change to the algorithm itself, is the idiomatic Rust shape of this principle.
 - **L -- Liskov Substitution.** Any type implementing a trait must be substitutable wherever that trait is expected, without surprising callers. In codebases with few polymorphic type hierarchies, don't manufacture a finding where there's no real substitution relationship to violate. Rust note: since Rust has no classical inheritance, LSP shows up purely as "does every impl of this trait honor the trait's implied contract," not as a class hierarchy concern.
 - **I -- Interface Segregation.** Don't force callers to depend on methods they don't use; prefer several small, focused traits over one large one. A large context struct passed wholesale into several functions that each touch only a subset of its fields is a mild ISP smell -- often an acceptable trade-off in a performance-critical hot loop to avoid parameter-list explosion, but worth a second look elsewhere.
-- **D -- Dependency Inversion.** High-level code should depend on abstractions (`trait`s), not concrete low-level details; combine with dependency injection for decoupling and testability. Introducing an abstraction trait for a dependency that has exactly one real implementation and no second implementation on the horizon is speculative and contradicts YAGNI -- revisit only when a second real implementation is actually needed.
+- **D -- Dependency Inversion.** High-level code should depend on abstractions (`trait`s), not concrete low-level details; combine with dependency injection for decoupling. Introducing an abstraction trait for a dependency that has exactly one real implementation and no second implementation on the horizon is speculative and contradicts YAGNI -- revisit only when a second real implementation is actually needed.
 
 ## 3. Rust-Specific Design Philosophy
 
@@ -32,7 +32,7 @@ Part A covers general software-engineering and Rust-language *design* principles
 - **Zero-Cost Abstractions.** Generics, monomorphization, and iterators compile down with no runtime overhead versus hand-written code -- don't sacrifice a clean abstraction for performance the compiler would have given you for free anyway. Before rejecting an abstraction on performance grounds, check whether it actually costs anything at the generated-code level, or only in perceived complexity.
 - **Data/Behavior Separation.** Unlike classical OOP's "data and methods bundled in one class," idiomatic Rust keeps `struct`s as plain data and puts behavior in separate `impl`/`trait` blocks.
 - **RAII (Resource Acquisition Is Initialization).** Rust's ownership/lifetime system plus `Drop` releases memory, file handles, and locks automatically at scope exit -- avoid manual resource-lifecycle management.
-- **Correct Error Handling.** No bare `panic!`/`.unwrap()` outside tests; recoverable errors return `Result<T, E>`, absence-of-value uses `Option<T>`, and `?` propagates errors upward. Production code that panics or exits abruptly on a condition that a caller could reasonably encounter (malformed input, a missing file) should instead surface a typed error.
+- **Correct Error Handling.** No bare `panic!`/`.unwrap()` in production code; recoverable errors return `Result<T, E>`, absence-of-value uses `Option<T>`, and `?` propagates errors upward. Production code that panics or exits abruptly on a condition that a caller could reasonably encounter (malformed input, a missing file) should instead surface a typed error.
 
   Bad -- panics the whole process on a condition callers will hit routinely:
 
@@ -146,13 +146,13 @@ For a CLI tool, this means each subcommand should be meant to do one legible thi
 - **Explicit over Implicit.** Allocation (`.clone()`), conversion (`.into()`), control flow, and lifetimes should be visible in the code, not happening invisibly in the background the way a scripting language might hide them.
 - **Ownership-Driven API Design.** Use the ownership/borrowing system itself to communicate intent: consuming `self` signals a single-use operation, `&self` signals a read-only operation, `&mut self` signals exclusive mutation.
 - **Fail-Fast & Compile-Time Safety.** Anything the compiler can catch should never be deferred to a runtime check. Fixed-size array parameters (so a length mismatch is a compile error, not a runtime one) and schema-driven config parsing (turning a malformed config file from a silent-corruption runtime bug into a parse error with a specific message) are both instances of this.
-- **Documentation as a First-Class Citizen.** Code is documentation; write thorough `///` doc comments, and use doc-tests so example code in documentation can never go stale relative to the actual implementation. Doc-tests are especially valuable on hand-implemented, non-standard algorithms with no external library to cross-check against -- the doc-test is the only thing keeping documented examples honest as the implementation evolves.
+- **Documentation as a First-Class Citizen.** Write thorough `///` doc comments and keep examples aligned with the actual implementation during review. Document input contracts, byte order, and failure behavior explicitly for hand-implemented, non-standard algorithms.
 
 ---
 
 # Part B -- Rust Ecosystem Operational Practices
 
-Part A covers design-time principles (how code and types are shaped). Part B covers the operational/tooling side: dependency governance, testing beyond unit tests, error type conventions, CI/CD, observability, and benchmarking -- practices widely adopted across the Rust community.
+Part A covers design-time principles (how code and types are shaped). Part B covers the operational/tooling side: dependency governance, production runtime verification, error type conventions, CI/CD, observability, and performance measurement.
 
 ## 7. Dependency & Supply-Chain Governance
 
@@ -163,14 +163,13 @@ Part A covers design-time principles (how code and types are shaped). Part B cov
 
 Choosing an audited crate for security-sensitive functionality (rather than hand-implementing it) is only as good as the mechanism that keeps verifying the dependency stays clean over time -- the choice itself is a point-in-time judgment, not an ongoing guarantee, without `cargo audit`/`cargo deny` wired into a recurring check.
 
-## 8. Testing Discipline Beyond Unit Tests
+## 8. Production Runtime Verification
 
-- **Property-based testing (`proptest`, `quickcheck`)** -- instead of hand-picked example inputs, assert an invariant holds across randomly generated inputs (e.g. "encode then decode is always the identity" for a round-trip codec, or "any valid size input rounds to an aligned value"). Finds edge cases hand-written test tables miss.
-- **Fuzzing (`cargo-fuzz` / `afl.rs`)** -- feed a function raw byte streams to find panics, crashes, or undefined behavior that structured tests won't stumble into by chance. Most valuable on parsers and format-decoders that handle untrusted input.
-- **Snapshot/golden tests** -- for stable, deterministic output, assert against a checked-in expected value rather than re-deriving the expected value in the test itself, which risks the test and the code drifting together on a shared bug.
-- **Cross-implementation differential testing** -- when two independent implementations of the same algorithm coexist (e.g. a scalar reference implementation and a SIMD-optimized one), assert they agree on the same inputs. This is one of the highest-value tests available whenever such a pair exists, since it catches divergence that neither implementation's own unit tests would.
+- **`mtsc verify`** -- retain the self-contained SOFTWARE ID pipeline and encoding round-trip checks in the production CLI.
+- **`HashEngine::self_check`** -- retain startup checks against the production scalar implementation for supported CPU backends; never execute unsupported instruction sets.
+- **Search hit verification** -- recompute the full SOFTWARE ID from each hit's actual serial/model/size/identity/bus before reporting it.
 
-Hand-implemented, non-standard algorithms with no library to cross-check against, and any code that processes untrusted or attacker-influenced input, are exactly the kind of code property-based testing and fuzzing exist for. Testing a well-established library's own parsing (e.g. a mature CLI-argument parser) is lower priority -- the library already validates its own contract.
+These are production safeguards, not a separate automated test suite. The project contains only production library/CLI code; standalone test and benchmark programs are not part of the current tooling.
 
 ## 9. Error-Type Design Idioms
 
@@ -197,7 +196,7 @@ This section is about *which* error-handling crate/pattern to reach for once it'
 
 ## 10. CI/CD & Release Discipline
 
-- **CI matrix: `cargo build`, `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`** on every push/PR, not just run locally before a commit. Local-only checks silently rot the moment one contributor forgets to run them.
+- **CI matrix** -- compile all six Linux/Windows/macOS × x86_64/aarch64 targets, run `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`, and package artifacts. Distributed binaries use portable CPU settings, not `target-cpu=native`.
 - **Semantic Versioning (SemVer)** -- for a CLI tool, SemVer applies primarily to *behavior/output stability* (flag names, output format on stdout that other tools might pipe from) rather than a Rust API surface, but the discipline of "does this change break an existing consumer" still applies.
 - **`cargo semver-checks`** -- automated SemVer-compliance checking; more relevant if/when any part of a codebase is exposed as a library crate rather than only a binary.
 - **Changelog maintenance (`CHANGELOG.md`, Keep a Changelog format)** -- especially valuable when command-line flags are the actual "API" users depend on; a changelog documents when a flag's default or meaning changed.
@@ -212,21 +211,21 @@ A set of check commands documented in a README or contributor guide is only as r
 
 For a short-lived CLI invocation rather than a long-running service, most of the "observability" toolbox (metrics export, distributed tracing) doesn't apply. The stdout/stderr contract and throttled progress reporting are usually the parts that genuinely matter; introducing a full `tracing` subscriber for a tool that runs for seconds-to-minutes and exits can be over-engineering relative to YAGNI (Part A §1).
 
-## 12. Benchmark Discipline
+## 12. Performance Measurement Discipline
 
-- **`criterion`** -- statistically rigorous micro-benchmarking (accounts for measurement noise, produces regression reports across runs) versus hand-rolled `Instant::now()` timing.
-- **Benchmark the invariant, not just the number** -- e.g. "the optimized path must stay faster than the reference path by at least Nx" as a checked assertion in a benchmark suite, not just an eyeballed number in a commit message, so a future change that regresses performance is caught mechanically.
+- **Record measurement context** -- CPU, OS, compiler, worker count, workload, warm-up, sample duration, and variability are necessary to interpret a throughput number.
+- **Distinguish workloads** -- hash-kernel and serial-preparation rates are not full search throughput or expected collision time. The [historical measurements](../benchmarks/README.md) preserve these distinctions; the standalone benchmark program is no longer included.
 - **`perf`/`cargo flamegraph` for profiling before optimizing** -- avoid speculative micro-optimizations; profile to confirm the hot path before spending effort on it. This is the performance-engineering analog of YAGNI: don't optimize what profiling hasn't shown to be the bottleneck.
 
-When a tool's core value proposition is throughput, correctness tests alone (known-value assertions) don't protect against a *slow* regression -- only a regression-tracked benchmark suite catches a change that silently halves throughput with nothing failing until someone notices the tool "feels slower."
+Production startup calibration chooses among supported backends at the requested concurrency; it is a short runtime heuristic, not a guarantee of the best end-to-end throughput under every load.
 
 ## Summary Table (Part B)
 
 | Area | Tooling |
 |---|---|
 | Supply chain | `cargo audit`, `cargo deny`, committed `Cargo.lock`, MSRV |
-| Testing | `proptest`, `cargo-fuzz`, golden tests, differential tests |
+| Runtime verification | `mtsc verify`, `HashEngine::self_check`, full-SID hit verification |
 | Error types | `thiserror` (modules) + `anyhow` (top level) |
-| CI/CD | full check matrix in CI, SemVer for CLI behavior, changelog |
+| CI/CD | six-platform builds, Clippy, formatting checks, artifact packaging |
 | Observability | `tracing`/leveled logs, stdout/stderr contract |
-| Benchmarking | `criterion`, profile-before-optimize |
+| Performance | contextualized historical measurements, profile-before-optimize |

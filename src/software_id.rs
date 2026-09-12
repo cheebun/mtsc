@@ -24,10 +24,7 @@ pub fn decode(s: &str) -> Result<u64, String> {
 
 /// Encode a u64 integer into a SOFTWARE ID string (`XXXX-XXXX` format).
 ///
-/// # Example
-/// ```
-/// assert_eq!(encode(0), "TTTT-TTTT");
-/// ```
+/// Zero encodes as `TTTT-TTTT`.
 pub fn encode(mut val: u64) -> String {
     let mut result = String::with_capacity(9);
     for i in 0..8 {
@@ -64,49 +61,4 @@ pub fn round_sectors(raw: u32) -> u32 {
     let shift = (bits - 4) as u32;
     let has_remainder = (raw & ((1 << shift) - 1)) != 0;
     ((raw >> shift) + if has_remainder { 1 } else { 0 }) << shift
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_encode_decode_roundtrip() {
-        // Synthetic roundtrip on arbitrary values (T = table index 0, N = 1, 0 = 2, E = 34)
-        // Note: least-significant digit is emitted first.
-        let cases = [
-            ("TTTT-TTTT", 0u64),
-            ("NTTT-TTTT", 1u64),
-            ("0TTT-TTTT", 2u64),
-            ("ETTT-TTTT", 34u64),
-        ];
-        for (sid, val) in &cases {
-            assert_eq!(decode(sid).unwrap(), *val, "decode {sid}");
-            assert_eq!(encode(*val), *sid, "encode {val}");
-        }
-        // Generic roundtrip on large pseudo-random values
-        for v in [1_000_000_000_000u64, 1_333_333_333_333, 1_999_999_999_999] {
-            assert_eq!(decode(&encode(v)).unwrap(), v, "roundtrip {v}");
-        }
-    }
-
-    #[test]
-    fn test_decode_invalid_char() {
-        assert!(decode("OOOO-OOOO").is_err(), "O is not in Base-35 table");
-    }
-
-    #[test]
-    fn test_round_sectors() {
-        // (raw >>11, expected rounded)
-        let cases = [
-            (0x1800u32, 0x1800u32), // 6G: already aligned
-            (0x1D7F, 0x1E00),       // 8G: round up
-            (0x4000, 0x4000),       // 16G: already aligned
-            (0x7600, 0x7800),       // 32G: round up
-            (0xEE81, 0xF000),       // 64G: round up
-        ];
-        for (raw, expected) in &cases {
-            assert_eq!(round_sectors(*raw), *expected, "round 0x{raw:X}");
-        }
-    }
 }

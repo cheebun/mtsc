@@ -97,11 +97,13 @@ Source: [issue #1](https://github.com/cheebun/mtsc/issues/1) (MurVlad). Verified
 
 Choose your desired disk size. Note the **Serial**, **Model**, and **SOFTWARE ID**, then follow the deployment guide.
 
-To search for a new disk size (see [command-reference.md](../reference/command-reference.md) for the `-u` unit flag; sub-1GB sizes down to 64MB are supported via `-u m/k/b`):
+To search for a new disk size using this table's original zero-padded serial/all-zero-identity convention (see [command-reference.md](../reference/command-reference.md); sub-1GiB sizes down to 64MiB use `--unit m/k/b`):
 
 ```bash
-mtsc search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml
+mtsc search --disk-size <N> --unit <g|m|k|b> --threads <threads> --count 0 --keys keys.toml --identity 00000000000000000000 --pad start
 ```
+
+Without those explicit compatibility options, search sweeps all 2048 `mbr_val` values and uses right-space padding. Record and deploy each new result's **serial, identity, and marker together** instead of assuming the standard header. Preserve all 20 digits when using existing zero-padded table entries.
 
 ### 128M
 

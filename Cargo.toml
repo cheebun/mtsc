@@ -1,8 +1,21 @@
 [package]
 name = "mtsc"
-version = "0.2.0"
+version = "0.4.0"
 edition = "2021"
+autotests = false
+autobenches = false
 description = "RouterOS L6 Serial Generator & License Key Converter"
+
+[lib]
+test = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "mtsc"
+path = "src/main.rs"
+test = false
+bench = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

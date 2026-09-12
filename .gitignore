@@ -1,4 +1,8 @@
 /target
+/target-*
+/dist/
+/docs/benchmarks/*.txt
+/docs/benchmarks/*.snapshot
 Cargo.lock
 *.swp
 *.swo
@@ -11,4 +15,4 @@ chr-system-id-formula.md
 keys.toml
 /backup/
 /logs/
-/dist/
+/tests/

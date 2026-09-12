@@ -4,61 +4,75 @@ Machine-executable rules for all AI tools working on this Rust project.
 
 ## Project
 
-`ros-serialgen` — RouterOS serial generator + key conversion CLI tool. Computes serials from an existing license (any level, L1-L6 -- the SOFTWARE ID computation and collision-search process don't depend on `nlevel`) via SOFTWARE ID collision search; custom model strings supported.
+`mtsc` — RouterOS serial generator + key conversion CLI tool. Computes serials from an existing license (any level, L1-L6 -- the SOFTWARE ID computation and collision-search process don't depend on `nlevel`) via SOFTWARE ID collision search; custom model strings supported.
 
 ## Architecture
 
 ```
 src/
-├── main.rs              CLI entry (clap subcommands) + multi-threaded search logic + tests
+├── main.rs              CLI entry (clap subcommands) + multi-threaded search logic
+├── lib.rs               SHA-256 calculation library used by the CLI
+├── sha256_backend.rs    CPU detection, once-only calibration, backend-owned batches
+├── sha256_cpu.rs        AArch64 detection + fail-closed macOS sysctl fallback
+├── sha256_shani.rs      SHA-NI x1/x2/x4 multi-buffer kernels (x86_64)
+├── sha256_avx2.rs       AVX2 x8 kernel (x86_64)
+├── sha256_arm.rs        ARM SHA2 x1/x2/x4 kernels (aarch64)
+├── sha256_neon.rs       NEON x4 kernel (aarch64)
 ├── sha256_constants.rs  Shared constants (ROUND_CONSTANTS + INITIAL_HASH_VALUES)
 ├── sha256.rs            MikroTik custom SHA-256 (scalar, production) + arbitrary-length digest
-├── sha256_scalar.rs     Scalar SHA-256 backup (#[cfg(test)], for cross-validation)
 ├── sha256_simd.rs       AVX-512 SIMD 16-way parallel SHA-256
 ├── software_id.rs       Base-35 encode/decode + sector_val rounding
-├── targets.rs           Load collision targets from keys.toml
+├── targets.rs           Load collision targets and derive MBR mixes
+├── mbr_table.rs         Validate identity/marker lookup table overrides
 ├── convert.rs           signature_hex ↔ Key text conversion (MTBase64) + metadata decode
 └── curve25519.rs        EC-KCDSA local license verification (curve25519-dalek-based, §8.32)
 
 keys.toml                External key configuration (loaded at runtime, no recompile needed)
+mbr-table.toml           Embedded complete MBR lookup table; optional validated runtime overrides
 ```
 
 ## Commands
 
 ```bash
 # Search for collisions
-ros-serialgen search --disk-size <N> --unit <g|m|k|b> --threads <threads> [--count <count>] [--from <from_M>] [--model <model>] [--keys <keys.toml>] [--identity <identity_hex>] [--bus <ide|scsi>]
-  --disk-size  Disk size magnitude, paired with --unit
+mtsc search --disk-size <N> --unit <g|m|k|b> --threads <threads> [--count <count>] [--from <from_M>] [--model <model>] [--keys <keys.toml>] [--identity <identity_hex>] [--bus <ide|nvme|scsi>] [--pad <start|end>] [--alphabet <symbols>] [--mbr-table <path>]
+  --disk-size  Disk size magnitude, paired with --unit; optional for scsi only if --model is supplied
   --unit       Unit: g (gigabytes, default), m (megabytes), k (kilobytes), b (bytes) -- min size is 64M in any unit
   --threads    Thread count
   --count      Collision count (default 1, 0 = unlimited collection)
   --from       Resume from N million hashes (matches the M value in progress output)
   --model      Custom Model (default ROS<N><unit>, e.g. ROS100G, ROS128M)
   --keys       Specify keys.toml path
-  --identity   Non-standard 20-hex-char MBR identity (0x100-0x109); default is the standard all-zero identity
-  --bus        Disk bus: ide (default, covers ide0/sata0) or scsi (scsi0/virtio-scsi-pci)
+  --identity   Fix a 20-hex-char MBR identity (0x100-0x109); omitted search identity sweeps all 2048 mbr_val values
+  --bus        Disk bus: ide (default, covers ide0/sata0), nvme (same rounding), or scsi (sector_val=0)
+  --pad        start: left-pad with alphabet[0]; end (default): right-pad natural serial with spaces
+  --alphabet   Ordered unique ASCII alphanumeric symbols (at least 2); default 0123456789
+  --mbr-table  Validated runtime overrides for the embedded complete identity/marker lookup table
 
 # Verify a serial
-ros-serialgen check --serial <value> --disk-size <N> --unit <g|m|k|b> [--model <model>] [--keys <keys.toml>] [--identity <identity_hex>] [--bus <ide|scsi>] [--license <license.key>]
+mtsc check --serial <value> --disk-size <N> --unit <g|m|k|b> [--model <model>] [--keys <keys.toml>] [--identity <identity_hex>] [--bus <ide|nvme|scsi>] [--license <license.key>]
   --license    Compare a .key file's (or raw signature_hex file's) embedded SOFTWARE ID against the one computed above
+  --identity   Unlike search, check still defaults to the standard all-zero identity
+  # Short numeric serials are checked with both zero- and space-padding; identical byte inputs are deduplicated.
 
-# Conversion (also prints SOFTWARE-ID/VERSION/LEVEL/NONCE-HASH/SIGNATURE/LICENSE-VALID metadata to stderr)
-ros-serialgen sig2key <128-char-hex>     # signature → Key text
-ros-serialgen key2sig <file.key>         # Key text → signature
+# Conversion (prints a unified metadata, signature hex, and key-text report to stdout)
+mtsc sig2key <128-char-hex>     # signature → Key text
+mtsc key2sig <file.key-or-text> # Key text or path → signature
 
 # Algorithm self-check
-ros-serialgen verify
+mtsc verify
 
 # Shell completion (bash/zsh/fish/powershell/elvish)
-ros-serialgen completions <shell>
+mtsc completions <shell>
 ```
 
 ## Build
 
 ```bash
-RUSTFLAGS='-C target-cpu=native' cargo build --release   # AVX-512 optimal
-cargo test          # 66+ unit tests (grows with new features -- see `cargo test` output for the exact count)
-cargo clippy        # a handful of pre-existing lints (too-many-arguments on CLI-plumbing functions, etc.); no new categories from recent changes
+cargo build --release   # Portable; CPU-specific kernels selected once at startup
+RUSTFLAGS='-C target-cpu=native' cargo build --release   # Optional machine-local build
+cargo check --all-targets
+cargo clippy --all-targets -- -D warnings
 cargo fmt --check   # format check
 ```
 
@@ -84,7 +98,16 @@ disclosure restriction from the user (currently: the 99 real-hardware CCR1009 li
 
 ## Code Rules
 
-- Single source of constants: `sha256_constants.rs`, shared by all three SHA-256 implementations
+- Single source of constants: `sha256_constants.rs`, shared by all SHA-256 implementations
+- Backend-owned batch size; do not assume 16 lanes in search code
+- CPU feature detection and calibration are startup-only; hashing kernels must not repeat them
+- Keep generated logs, performance samples, environment dumps, and build artifacts out of Git
+- Keep Git-tracked library/CLI code production-only; do not commit automated tests or standalone benchmark suites
+- Put all future local test scripts, harnesses, fixtures, benchmark programs, logs, and results under the gitignored `/tests/<task>/` directory; keep test-specific build output there too (for Rust harnesses, set `CARGO_TARGET_DIR` accordingly)
+- Do not embed test modules in `src/`, scatter test files elsewhere, or add local test targets to the production Cargo manifest or CI
+- Never force-add files from `/tests/`; before committing, check staged paths for test files and artifacts
+- Preserve production runtime verification: `mtsc verify`, `HashEngine::self_check`, and full SOFTWARE ID verification of search hits
+- CI builds all six Linux/Windows/macOS × x86_64/aarch64 targets, runs Clippy and formatting checks, and packages artifacts; do not use `target-cpu=native` for distributed binaries
 - Consistent naming: `sid_lo`/`sid_hi` (not hash_lo/d4), `max_collisions` (not target_count)
 - All public functions must have `///` doc comments
 - SHA-256 implementations must annotate the reason for byte-order conversions
@@ -112,27 +135,13 @@ Base-35 table: "TN0BYX18S5HZ4IA67DGF3LPCJQRUK9MW2VE"
 - `_mm512_shuffle_epi8` SIMD byte-order conversion
 - bswap mask hoisted to function top for reuse
 - BCD incremental counter + W[5..9] precomputation
-- sid_hi lookup pre-filter (256-byte lookup table)
-
-## Testing
-
-- `sha256::tests::test_6g_known_hash` — 6G VMware known hash value
-- `sha256_simd::tests::test_simd_matches_scalar` — SIMD vs scalar cross-validation
-- `sha256_simd::tests::test_simd_6g_known` — SIMD 6G known value
-- `software_id::tests::test_encode_decode_roundtrip` — encode/decode roundtrip
-- `software_id::tests::test_decode_invalid_char` — invalid character error
-- `software_id::tests::test_round_sectors` — 5 rounding verification cases
-- `convert::tests::test_roundtrip_synthetic` — sig ↔ key conversion verification
-- `main::tests` — disk size parsing/validation, write_serial, BCD, software_id, model, input_buf, check_match, E2E, identity parsing/mix resolution
-- `targets::tests` — 3 tests covering `mix_from_identity` (matches standard for all-zero, deterministic, differs for non-zero)
-- `curve25519::tests` — EC-KCDSA verify against `TI09-7WK3`'s real, hardware-activation-confirmed
-  signature (must return `true`), plus rejection tests for a tampered signature/payload/wrong
-  public key (must return `false`) -- see `docs/investigation/license-internals.md` §8.32
+- Full-width sid_hi lookup pre-filter (512 entries, including the required bit 8); sweep matching bypasses fixed-identity prefilter
 
 ## Dependencies
 
 - `clap` 4.x — CLI framework (derive mode)
 - `clap_complete` 4.x — shell completion script generation (`completions` subcommand)
+- `serde` 1.x and `toml` 1.x — structured key configuration and MBR table parsing
 - `curve25519-dalek` 4.x — audited Curve25519 field/point arithmetic for EC-KCDSA local license
   verification (`LICENSE-VALID` output); see `docs/investigation/license-internals.md` §8.32 for why this one
   isn't hand-implemented

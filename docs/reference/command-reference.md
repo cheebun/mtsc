@@ -13,32 +13,52 @@ mtsc search --disk-size 100 --unit g --threads 16 --count 0 --keys keys.toml
 mtsc search --disk-size 128 --unit m --threads 16 --count 0 --keys keys.toml
 ```
 
-| Flag | Long form | Meaning |
-|---|---|---|
-| `-s <N>` | `--disk-size <N>` | Disk size magnitude, paired with `-u`/`--unit`. Determines `sector_val` -- must match the disk you'll actually create. **Required.** |
-| `-u <unit>` | `--unit <unit>` | Unit for `-s`: `g` (gigabytes, default), `m` (megabytes), `k` (kilobytes), or `b` (raw bytes). Case-insensitive. |
-| `-t <N>` | `--threads <N>` | Number of search threads. Defaults to all available CPU cores if omitted. |
-| `-m <name>` | `--model <name>` | Disk model string to search under. Defaults to `ROS<N><unit>` (e.g. `ROS100G`, `ROS128M`) if omitted. |
-| `-k <path>` | `--keys <path>` | Path to `keys.toml`. Defaults to `./keys.toml` if omitted. |
-| `-c <N>` | `--count <N>` | Number of collisions to find before stopping. `1` (default) stops at the first hit; `0` runs until interrupted (Ctrl+C), collecting every hit. |
-| `-f <N>` | `--from <N>` | Resume the search from N million hashes in, matching the `M` value printed in progress output. Defaults to `0` (start from the beginning). |
-| `-i <hex>` | `--identity <hex>` | Non-standard 20-hex-char MBR identity seed (`0x100-0x109`), e.g. captured from a real device. Defaults to the standard all-zero identity used by collision search if omitted. See [license-internals.md](../investigation/license-internals.md#36-marker-and-reserved-generated-from-identity-not-just-checked) for what this changes and why. |
-| `-b <bus>` | `--bus <bus>` | Disk bus type: `ide` (default, verified against real hardware -- covers both `ide0` and `sata0`/AHCI, which use the identical encoding, §8.20) or `scsi` (`scsi0`/`virtio-scsi-pci` specifically -- forces `sector_val=0`; does **not** apply to `sata0`). See [license-internals.md §8](../investigation/license-internals.md#8-arm32-keyman-on-virtio-scsi-a-platform-specific-investigation) -- `scsi` mode's SOFTWARE ID computation and full end-to-end activation are both confirmed on x86_64 (§8.14, §8.18); on ARM64 a separate virtualization-detection issue can still prevent activation (§8.15-8.17). |
+| Option | Meaning |
+|---|---|
+| `--disk-size <N>` | Disk size magnitude, paired with `--unit`. **Required for `ide`/`nvme`**; determines `sector_val` and must match the disk you'll create. Optional for `scsi`, whose `sector_val` is always `0`. |
+| `--unit <unit>` | Unit for `--disk-size`: `g` (GiB, default), `m` (MiB), `k` (KiB), or `b` (raw bytes). Case-insensitive. |
+| `--threads <N>` | Number of search threads. Defaults to all available CPU cores if omitted. |
+| `--model <name>` | Disk model string, truncated or space-padded to 16 bytes for hashing. Defaults to `ROS<N><unit>` (e.g. `ROS100G`, `ROS128M`) when a size is supplied. **Required when `--bus scsi` is used without `--disk-size`.** |
+| `--keys <path>` | Path to `keys.toml`. Defaults to `./keys.toml` if omitted; missing or empty target configuration is an error. |
+| `--count <N>` | Number of collisions to find before stopping. `1` (default) stops at the first hit; `0` imposes no hit-count limit (Ctrl+C stops the search). |
+| `--from <N>` | Start at candidate index `N × 1,000,000`, matching the `M` progress unit. Default `0`. Indices use `u64`; this is not a promise to enumerate every string in `alphabet_len^20`. Keep model, size, bus, alphabet order, padding, identity mode, and targets unchanged when resuming. |
+| `--identity <hex>` | Fix the 10-byte MBR identity seed (`0x100-0x109`), supplied as exactly 20 hex characters. **If omitted, search covers all 2048 `mbr_val` values for each candidate**, not just the all-zero identity. |
+| `--mbr-table <path>` | Identity/marker lookup table for sweep mode only (no `--identity`). Defaults to `./mbr-table.toml` if present, otherwise the embedded complete table. Valid partial entries override the embedded table; missing entries retain their embedded defaults. Invalid entries are rejected with warnings and leave the defaults intact, including identities/markers that do not reproduce their declared `mbr_val` and marker. |
+| `--pad <start\|end>` | Default `end`: use the candidate's natural symbol length and **right-pad with spaces** to 20 bytes (`123` becomes `123` plus 17 spaces). `start` left-pads to 20 bytes with `alphabet[0]` (`0` for the default alphabet). |
+| `--alphabet <symbols>` | Ordered candidate alphabet; default `0123456789`. Must contain at least two distinct, non-repeated ASCII letters/digits. Order defines base-N counting and the first symbol is the zero/left-padding symbol. For example, `0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ` selects base 36. |
+| `--bus <ide\|scsi\|nvme>` | `ide` (default) covers `ide0` and `sata0`/AHCI. `nvme` uses the same size-dependent sector rounding as `ide`. `scsi` covers `scsi0`/`virtio-scsi-pci`, **not `sata0`**, and forces `sector_val=0`. SCSI activation is confirmed on x86_64; ARM64 virtualization-detection caveats remain in [license-internals.md §8](../investigation/license-internals.md#8-arm32-keyman-on-virtio-scsi-a-platform-specific-investigation). |
+
+### Compatibility with older collision tables
+
+Existing zero-padded serial/all-zero-identity tables use the old search convention. Reproduce it explicitly:
+
+```bash
+mtsc search --disk-size 100 --unit g --threads 16 --count 0 --keys keys.toml --identity 00000000000000000000 --pad start
+
+# SCSI needs a model, but not a disk size
+mtsc search --bus scsi --model RouterOS-SCSI --threads 16 --keys keys.toml
+```
+
+Default sweep results include `identity` and `marker`. **Deploy those exact values with the printed serial**, rather than copying the old `00000000000000000000BDE800000000` MBR header. When checking a hit, pass its identity explicitly; `check` does not inherit `search`'s sweep default. Keep a full 20-byte zero-padded serial intact when reproducing an older table entry.
+
+If `alphabet_len^20` fits in `u64`, search stops and reports exhaustion instead of repeating candidates. Otherwise, the `u64` candidate index wraps to zero after `u64::MAX`. An overflowing `--from` offset or one beyond a finite candidate space is rejected.
+
+Candidate generation supports every CPU backend: scalar, SHA-NI, AVX2, AVX-512, ARM SHA2, and NEON as supported by the CPU/OS. Startup calibration selects the backend once for the requested thread count; backend-owned batches are retained for both padding modes and custom alphabets. This does not guarantee identical end-to-end throughput for different alphabets or sweep/fixed-identity modes. See [SHA-256 backends](sha256-backends.md).
 
 ### Minimum disk size per unit
 
-Each unit has a separate minimum, all equivalent to 64 MB, enforced at startup (the process exits with an error if violated):
+Sizes use powers of 1024. Each unit has a separate integer minimum, enforcing at least 64 MiB at startup (the process exits with an error if violated). This also applies to a size explicitly supplied for `scsi`, even though its hash ignores size:
 
-| Unit | Minimum `-s` value |
+| Unit | Minimum `--disk-size` value |
 |---|---|
-| `g` | `1` (1 GB) |
-| `m` | `64` (64 MB) |
-| `k` | `65536` (64 MB in KB) |
-| `b` | `67108864` (64 MB in bytes) |
+| `g` | `1` (1 GiB; integer magnitudes cannot express 64 MiB) |
+| `m` | `64` (64 MiB) |
+| `k` | `65536` (64 MiB in KiB) |
+| `b` | `67108864` (64 MiB in bytes) |
 
-Decimal sizes are not supported (`-s` is an integer) -- fractional GB values must be expressed in a smaller unit instead, e.g. `-s 1536 --unit m` for 1.5 GB. This avoids floating-point rounding errors in the byte-exact `sector_val` calculation.
+Decimal sizes are not supported (`--disk-size` is an integer) -- fractional GiB values must be expressed in a smaller unit instead, e.g. `--disk-size 1536 --unit m` for 1.5 GiB. This avoids floating-point rounding errors in the byte-exact `sector_val` calculation.
 
-Progress is logged every 10,000M (10 billion) hashes, e.g. `10000M hashes, 5s, 0 found`. At ~2000M hash/s (AVX-512) that's roughly every 5 seconds; at ~100M hash/s (scalar) roughly every 100 seconds.
+Progress uses millions of candidate hashes, with a nominal interval of 10,000M (10 billion), e.g. `10000M hashes, 5s, 0 found`. Sweeping 2048 `mbr_val` values reuses each candidate's hash; it does not multiply the `--from` index by 2048. Wall-clock intervals vary by backend and workload; the [historical backend measurements](../benchmarks/README.md) are not full search throughput.
 
 ## `mtsc check`
 
@@ -46,27 +66,43 @@ Progress is logged every 10,000M (10 billion) hashes, e.g. `10000M hashes, 5s, 0
 mtsc check --serial 00000000090681934458 --disk-size 24 --unit g --model cheerlon
 ```
 
-| Flag | Long form | Meaning |
-|---|---|---|
-| `--serial <value>` | -- | The serial number to verify. **Required.** No short form (`-s` is reserved for disk size). Pure-digit serials are left-padded with `0` to 20 characters automatically (`--serial 1` == `--serial 00000000000000000001`), so leading zeros can be omitted; alphanumeric serials are used as-is (right-padded with spaces internally, not zeros). |
-| `-s <N>` | `--disk-size <N>` | Disk size magnitude, paired with `-u`/`--unit`. **Required.** |
-| `-u <unit>` | `--unit <unit>` | Unit for `-s`: `g` (gigabytes, default), `m` (megabytes), `k` (kilobytes), or `b` (raw bytes). Same minimums as `search` above. |
-| `-m <name>` | `--model <name>` | Disk model string. Defaults to `ROS<N><unit>` if omitted. |
-| `-k <path>` | `--keys <path>` | Path to `keys.toml`. Defaults to `./keys.toml` if omitted. |
-| `-i <hex>` | `--identity <hex>` | Non-standard 20-hex-char MBR identity seed. Same meaning as `search`'s `-i` above. |
-| `-b <bus>` | `--bus <bus>` | Disk bus type: `ide` (default) or `scsi`. Same meaning and caveats as `search`'s `-b` above. |
+| Option | Meaning |
+|---|---|
+| `--serial <value>` | Serial to verify. **Required.** For a pure-digit serial shorter than 20 bytes, computes both left-zero-padding and right-space-padding and labels the results. Alphanumeric serials are right-space-padded. If both forms yield identical 20-byte input, only one result is printed; an already-20-byte serial is unchanged. |
+| `--disk-size <N>` | Required for `ide`/`nvme`; optional for `scsi`, whose `sector_val` is always `0`. |
+| `--unit <unit>` | `g` (GiB, default), `m` (MiB), `k` (KiB), or `b` (bytes); same supplied-size minimums as `search`. |
+| `--model <name>` | Defaults to `ROS<N><unit>` when size is supplied. Required for `--bus scsi` without `--disk-size`. |
+| `--keys <path>` | Path to `keys.toml`; defaults to `./keys.toml`. |
+| `--identity <hex>` | Exactly 20 hex characters for the 10-byte MBR identity seed. **Default remains all zeros**, unlike `search`; no sweep is performed. Pass a search result's identity explicitly. |
+| `--bus <ide\|scsi\|nvme>` | Same meanings and platform caveats as `search`; default `ide`. |
+| `--license <path>` | Compare the computed SOFTWARE ID with the embedded ID from a `.key` file or a raw 128-character signature-hex file. This compares IDs, not the hardware's eventual activation state. |
 
-Prints the computed SOFTWARE ID, and if it matches a known signature, the License Key and MBR hex. When `-i` is given, the printed MBR hex uses that identity instead of the standard all-zero header -- but still assumes standard `BDE800000000` for marker/reserved, which is only correct if you know that's what the source device actually used (see the note above). The `keys.toml` match lookup (`✅ Matched signature: ...`) correctly accounts for `-i`'s mix when comparing.
+Prints the computed SOFTWARE ID for each distinct padding variant. A configured target match also prints its License Key and MBR hex. The MBR header uses the selected identity and its **derived marker**, followed by four zero reserved bytes; it does not hardcode `BDE8` for nonzero identities. See [identity/marker formula](identity-marker-formula.md).
+
+```bash
+# Recheck a sweep result with its identity (supply the serial exactly as printed)
+mtsc check --serial <serial> --disk-size 100 --unit g --model ROS100G --identity <identity-from-search> --license license.key
+
+# No size needed for SCSI, but the model is mandatory
+mtsc check --serial 123 --bus scsi --model RouterOS-SCSI
+```
 
 ## `mtsc sig2key <signature_hex>`
 
-Positional argument: a 128-character hex string (64 bytes) -- the signature from the [Signature Table](../database/collision-database.md#signature-table). Prints the corresponding `-----BEGIN MIKROTIK SOFTWARE KEY-----...` block to stdout.
+Positional argument: a 128-character hex string (64 bytes) -- the signature from the [Signature Table](../database/collision-database.md#signature-table).
 
-Also prints `SOFTWARE-ID`/`VERSION`/`LEVEL` to **stderr** (so stdout stays exactly the key text, safe to redirect or copy/paste as-is) -- decrypted from the signature's first 16 bytes, confirming what SOFTWARE ID and license level this signature actually corresponds to. See [license-internals.md §8.21](../investigation/license-internals.md#821-signature-metadata-decryption-mt_transform) for how this works.
+Both conversion commands print the same report to **stdout**: `Software ID`, `Router OS Version`, `License Level`, `Nonce Hash`, `Signature`, local EC-KCDSA `License valid`, the full 64-byte `MBR Signature (hex)`, and the equivalent `License` key-text block. Warnings/errors go to stderr. The `Signature` metadata field is only the trailing 32-byte signature scalar; use `MBR Signature (hex)` when you need the complete 128-character blob.
 
-## `mtsc key2sig <key_file>`
+**Stdout is not a bare `.key` or hex file.** Copy only the complete `BEGIN`/`END MIKROTIK SOFTWARE KEY` block (without the `License:` label) for a `.key` file, or only the `MBR Signature (hex)` value for raw hex. See [license metadata decoding](../investigation/license-internals.md#821-signature-metadata-decryption-mt_transform) and [license-internals.md §8.32](../investigation/license-internals.md).
 
-Positional argument: path to a `.key` file containing MikroTik key text. Prints the 128-character signature hex to stdout, and the same `SOFTWARE-ID`/`VERSION`/`LEVEL` metadata to stderr as `sig2key` above.
+## `mtsc key2sig <key_file_or_text>`
+
+Accepts either an existing `.key` file path or literal MikroTik key text as one quoted positional argument, including the complete `-----BEGIN...` block. If the argument names an existing file, its contents are read; otherwise the argument itself is parsed as key text. Prints the same unified stdout report as `sig2key`.
+
+```bash
+mtsc key2sig license.key
+mtsc key2sig '<complete MikroTik key text>'
+```
 
 ## `mtsc verify`
 
@@ -76,6 +112,16 @@ mtsc verify
 
 No arguments, no `keys.toml` needed -- this is a self-contained sanity check, unrelated to real signatures or collision search.
 
-Runs the full SOFTWARE ID pipeline (custom SHA-256 -> MBR mix XOR -> Base-35 encode) against two fixed, hardcoded (serial, model, sector_val) test vectors, then checks that the result round-trips correctly through `encode -> decode -> re-encode`. Also prints which hash engine is active (`AVX-512 x16` or `scalar`), so you can confirm SIMD acceleration is being used on the current machine.
+Runs the full SOFTWARE ID pipeline (custom SHA-256 -> MBR mix XOR -> Base-35 encode) against two fixed, hardcoded (serial, model, sector_val) test vectors, then checks that the result round-trips correctly through `encode -> decode -> re-encode`. Also prints the startup-selected hash engine and batch width: scalar, SHA-NI, AVX2, AVX-512, ARM SHA2, or NEON according to CPU/OS support and once-only calibration. It is not an AVX-512-only acceleration check.
 
 Run this once after building, or after moving to a different machine/CPU, before trusting `search` output.
+
+## `mtsc completions <shell>`
+
+Prints a completion script to stdout for `bash`, `zsh`, `fish`, `powershell`, or `elvish`.
+
+```bash
+mtsc completions bash
+```
+
+Use `mtsc --help` or `mtsc <subcommand> --help` for the CLI's full option list and supported short aliases; examples here use long options.

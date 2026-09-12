@@ -13,8 +13,10 @@
 
 ## Search Seeds — model `RouterOS-SCSI`, 1G
 
+The original run used 1G disks; size is irrelevant to this SCSI hash. The command below omits size, supplies the required model, and explicitly retains the table's zero-padded/all-zero-identity convention. Default sweep results must instead retain their own output identity/marker and serial padding.
+
 ```
-mtsc search --bus scsi --disk-size 1 --unit g --threads 4 --count 0 --model RouterOS-SCSI
+mtsc search --bus scsi --threads 4 --count 0 --model RouterOS-SCSI --identity 00000000000000000000 --pad start
 ```
 
 | Software ID | Serial |

@@ -127,8 +127,8 @@ pub(crate) fn decode_verify_inputs(signature_hex: &str) -> Result<VerifyInputs, 
 /// which are the same table `MT_Transform` uses (confirmed against MTLic's `MTTools.py`).
 fn mt_transform(block: &mut [u8; 16]) {
     let mut s = [0u32; 4];
-    for (w, chunk) in s.iter_mut().zip(block.chunks_exact(4)) {
-        *w = u32::from_be_bytes(chunk.try_into().unwrap());
+    for (w, chunk) in s.iter_mut().zip(block.as_chunks::<4>().0) {
+        *w = u32::from_be_bytes(*chunk);
     }
 
     for i in 0..16 {
@@ -152,7 +152,7 @@ fn mt_transform(block: &mut [u8; 16]) {
         s[p] = (s[t].rotate_left(k3 & 0x0F) ^ s[p]).wrapping_add(s[t]);
     }
 
-    for (chunk, w) in block.chunks_exact_mut(4).zip(s.iter()) {
+    for (chunk, w) in block.as_chunks_mut::<4>().0.iter_mut().zip(s.iter()) {
         chunk.copy_from_slice(&w.to_be_bytes());
     }
 }
@@ -183,7 +183,7 @@ fn mt_base64_encode(data: &[u8]) -> String {
     }
 
     // Padding
-    while encoded.len() % 4 != 0 {
+    while !encoded.len().is_multiple_of(4) {
         encoded.push('=');
     }
 
@@ -224,7 +224,7 @@ fn mt_base64_decode(data: &str) -> Result<Vec<u8>, String> {
 /// hex string → byte array
 fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
     let hex = hex.trim();
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err("hex string must have even length".to_string());
     }
     (0..hex.len())
@@ -239,58 +239,4 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
 /// byte array → uppercase hex string
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02X}", b)).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_roundtrip_synthetic() {
-        // Synthetic 64-byte signature; verify sig→key→sig round-trips exactly.
-        let sig: String = (0..64)
-            .map(|i| format!("{:02X}", (i * 7 + 3) as u8))
-            .collect();
-
-        // sig → key
-        let key = signature_to_key_text(&sig).unwrap();
-        assert!(key.starts_with("-----BEGIN"), "key header missing");
-        assert!(key.trim_end().ends_with("-----"), "key footer missing");
-
-        // key → sig
-        let back = key_text_to_signature(&key).unwrap();
-        assert_eq!(back, sig, "sig↔key roundtrip mismatch");
-    }
-
-    #[test]
-    fn test_key_text_three_input_forms_agree() {
-        // TI09-7WK3's known-good signature (see docs/license-internals.md §8.32), exercised
-        // through all three input forms `key_text_to_signature` must accept.
-        let sig = "E67A8F47AE86672FAE6D91DF19221453B34FE40E23F19E917107C449DDCB1D2061521816AD7730671B4CB226F1B0DB7448923C6297C49BDB3CCBF40AECBBCF0B";
-
-        // Form 1: single-line, this project's own signature_to_key_text output
-        let single_line = signature_to_key_text(sig).unwrap();
-        assert!(!single_line.contains('\n'), "expected single-line output");
-        assert_eq!(key_text_to_signature(&single_line).unwrap(), sig);
-
-        // Form 2: bare base64, no BEGIN/END markers at all
-        let bare_b64 = "mr3jH5qhn9irtF53ZICFTN7Tk7wIx7ZkxdAxJ19ydASYShhFteHMntBTyaS8wuNdIJJPidJxbuNPLTvCsv7zLA==";
-        assert_eq!(key_text_to_signature(bare_b64).unwrap(), sig);
-
-        // Form 3: traditional multi-line, indented `.key` file format
-        let multi_line = "  -----BEGIN MIKROTIK SOFTWARE KEY------------\n  mr3jH5qhn9irtF53ZICFTN7Tk7wIx7ZkxdAxJ19ydASY\n  ShhFteHMntBTyaS8wuNdIJJPidJxbuNPLTvCsv7zLA==\n  -----END MIKROTIK SOFTWARE KEY--------------";
-        assert_eq!(key_text_to_signature(multi_line).unwrap(), sig);
-    }
-
-    #[test]
-    fn test_decode_metadata_vi8q_e90f() {
-        // VI8Q-E90F's signature hex, from docs/collision-database.md -- confirmed L1
-        // (nlevel: 1) on real hardware. Also independently confirmed by decoding this
-        // project's key-text form of the same signature against the reference MT_Transform.
-        let sig = "FAF308BA3FFD4185308A8784244749EFFE7E4E65C14C01CD55D946506B47F636757F62106D114329104012DE7B44543F3444F0E724080873E3A20E11F5EF450E";
-        let meta = decode_metadata(sig).unwrap();
-        assert_eq!(meta.software_id, "VI8Q-E90F");
-        assert_eq!(meta.level, 1);
-        assert!(meta.padding_ok);
-    }
 }

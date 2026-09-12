@@ -1645,14 +1645,14 @@ Continuing §8.53's open thread with `r2`'s deeper `aaaa` analysis pass (plain `
 The patch (lines 693831-693839) modifies `drivers/usb/storage/scsiglue.c`'s `show_info()` function -- the exact callback (registered at line 604 of the same file) that generates `/proc/scsi/usb-storage/<N>`'s content:
 
 ```diff
- 	seq_printf(m, "     Protocol: %s\n", us->protocol_name);
- 	seq_printf(m, "    Transport: %s\n", us->transport_name);
- 
-+	seq_printf(m, "     VendorID: %04x\n", us->pusb_dev->descriptor.idVendor);
-+	seq_printf(m, "     ProductID: %04x\n", us->pusb_dev->descriptor.idProduct);
+     seq_printf(m, "     Protocol: %s\n", us->protocol_name);
+     seq_printf(m, "    Transport: %s\n", us->transport_name);
+
++    seq_printf(m, "     VendorID: %04x\n", us->pusb_dev->descriptor.idVendor);
++    seq_printf(m, "     ProductID: %04x\n", us->pusb_dev->descriptor.idProduct);
 +
- 	/* show the device flags */
- 	seq_printf(m, "       Quirks:");
+     /* show the device flags */
+     seq_printf(m, "       Quirks:");
 ```
 
 This is inserted right after the `Transport:` line, in the exact `"     VendorID: %04x\n"` / `"     ProductID: %04x\n"` text format `keyman` scans for via `" VendorID: %x"` / `" ProductID: %x"` (§8.51). Grepping the unpatched vanilla tree at `2025-03-19/linux-5.6.3/drivers/usb/storage/` confirms no `VendorID`/`ProductID` string literal exists anywhere before this patch -- it's a genuine MikroTik-authored addition, not an upstream feature Alpine's kernel happened to lack for unrelated reasons.
