@@ -98,20 +98,28 @@ enum Commands {
         /// filled in from the embedded default, so an incomplete file is never a hard error.
         #[arg(long = "mbr-table")]
         mbr_table: Option<String>,
-        /// How numeric candidate serials are padded to 20 bytes: zero (default, left-pad
-        /// with '0', e.g. "123" -> "00000000000000000123") or space (right-pad with spaces
-        /// using the natural digit count, e.g. "123" -> "123                 "). Real disks
-        /// don't always zero-pad a short numeric serial (confirmed on real hardware: QEMU's
-        /// scsi0 `serial=` property is written verbatim, not zero-padded, so a disk with a
-        /// short numeric serial may actually be space-padded by the controller instead) --
-        /// use this to search under that alternate assumption.
-        #[arg(
-            long = "serial-pad",
-            value_enum,
-            ignore_case = true,
-            default_value = "zero"
-        )]
-        serial_pad: SerialPad,
+        /// Where padding goes for a numeric candidate serial shorter than 20 bytes: start
+        /// (left-pad with '0', e.g. "123" -> "00000000000000000123") or end (default,
+        /// right-pad with spaces using the natural digit count, e.g. "123" ->
+        /// "123                 "). `end` matches real hardware's actual behavior
+        /// (confirmed via a live RouterOS boot test, docs/license-internals.md §8.62) --
+        /// use `start` only if you specifically need the old zero-padded numeric-string
+        /// assumption.
+        #[arg(long = "pad", value_enum, ignore_case = true, default_value = "end")]
+        pad: PadPosition,
+        /// Alphabet (in symbol order, index 0 = the "zero"/pad-with symbol) that numeric
+        /// candidate serials are drawn from -- base = alphabet length. Default: digits only
+        /// ("0123456789"), giving pure decimal counting identical to this tool's original
+        /// behavior. Pass a wider alphabet (e.g. "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ", base
+        /// 36) to search alphanumeric candidates -- useful when a real target serial contains
+        /// letters. NOTE: a non-default alphabet forces scalar mode (no AVX-512 SIMD) -- the
+        /// SIMD engine's BCD-nibble increment trick is specific to base-10; only the default
+        /// alphabet gets full SIMD throughput. A non-default alphabet also makes the
+        /// effective search space enormous (alphabet_len^20) -- in practice only the
+        /// low-order ~12 positions (bounded by u64 candidate-counter width) actually vary;
+        /// higher positions stay fixed at `alphabet[0]`, acting as an implicit prefix.
+        #[arg(long = "alphabet", default_value = "0123456789")]
+        alphabet: String,
     },
     /// Convert signature_hex to Key text
     Sig2key {
@@ -206,14 +214,21 @@ impl BusType {
     }
 }
 
-/// How a numeric candidate serial is padded to `SERIAL_LEN` bytes during `search`.
-/// See `zero_padded_to_space_padded` for the space-padding transform.
+/// Where padding goes when a numeric candidate serial is shorter than `SERIAL_LEN` bytes
+/// during `search`: at the `Start` (padding character is `'0'`) or at the `End` (padding
+/// character is a space, using the candidate's natural digit count with no leading
+/// zeros). `End` is the default -- confirmed as real hardware's actual behavior via a
+/// live RouterOS boot test (docs/investigation/license-internals.md §8.62), where
+/// `Start` (the old default) reflects the numeric-string convention this tool originally
+/// assumed before that real-hardware confirmation. See `zero_padded_to_space_padded` for
+/// the `Start` -> `End` transform.
 #[derive(Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
-enum SerialPad {
-    /// Left-pad with '0' (default, current/original behavior).
-    Zero,
-    /// Right-pad with spaces, using the candidate's natural digit count (no leading zeros).
-    Space,
+enum PadPosition {
+    /// Pad at the start with '0' (left-pad).
+    Start,
+    /// Pad at the end with spaces (right-pad), using the candidate's natural digit count.
+    /// Default -- see this enum's doc comment for why.
+    End,
 }
 
 /// Disk size unit, paired with the `--disk-size` magnitude
@@ -343,8 +358,16 @@ struct SearchContext {
     raw_targets: Option<Arc<Vec<targets::RawTarget>>>,
     /// `Some` only in full-mbr_val-sweep mode -- pairs with `raw_targets`.
     mbr_table: Option<Arc<mbr_table::MbrTable>>,
-    /// How numeric candidate serials are padded to `SERIAL_LEN` bytes -- see `SerialPad`.
-    serial_pad: SerialPad,
+    /// Where padding goes for numeric candidate serials shorter than `SERIAL_LEN` bytes
+    /// -- see `PadPosition`.
+    pad: PadPosition,
+    /// Alphabet candidate serials are drawn from -- see `validate_alphabet`. `alphabet[0]`
+    /// doubles as the "zero"/pad-with symbol for `PadPosition::End`'s leading-run strip.
+    alphabet: Vec<u8>,
+    /// Cached `alphabet == b"0123456789"` -- lets the hot loop pick the fast
+    /// `write_serial`/`increment_bcd` path (identical to this tool's original behavior)
+    /// without re-comparing the alphabet on every iteration.
+    is_default_alphabet: bool,
     mix_lo: u32,
     mix_hi: u32,
     max_collisions: usize,
@@ -387,20 +410,95 @@ fn increment_bcd(buf: &mut [u8; SERIAL_LEN]) {
     }
 }
 
-/// Convert a zero-padded 20-byte numeric serial (as produced by `write_serial`/
-/// `increment_bcd`) into its space-padded equivalent: strip the leading zeros (keeping at
-/// least one digit for value 0), left-justify, and right-pad with spaces to fill the rest.
-/// E.g. `"00000000000000000123"` -> `"123                 "`.
+/// Strip a leading run of `pad_byte` (keeping at least one symbol), left-justify, and
+/// right-pad with spaces to fill the rest -- the arbitrary-alphabet generalization of
+/// `zero_padded_to_space_padded` (which is this function specialized to `pad_byte = b'0'`,
+/// the default alphabet's "zero" symbol). E.g. with `pad_byte = b'0'`:
+/// `"00000000000000000123"` -> `"123                 "`.
 #[inline(always)]
-fn zero_padded_to_space_padded(buf: &[u8; SERIAL_LEN]) -> [u8; SERIAL_LEN] {
-    let first_nonzero = buf
+fn leading_pad_to_space_padded(buf: &[u8; SERIAL_LEN], pad_byte: u8) -> [u8; SERIAL_LEN] {
+    let first_significant = buf
         .iter()
-        .position(|&b| b != b'0')
+        .position(|&b| b != pad_byte)
         .unwrap_or(SERIAL_LEN - 1);
     let mut out = [SPACE_PADDING; SERIAL_LEN];
-    let sig_len = SERIAL_LEN - first_nonzero;
-    out[..sig_len].copy_from_slice(&buf[first_nonzero..]);
+    let sig_len = SERIAL_LEN - first_significant;
+    out[..sig_len].copy_from_slice(&buf[first_significant..]);
     out
+}
+
+/// Convert a zero-padded 20-byte numeric serial (as produced by `write_serial`/
+/// `increment_bcd`) into its space-padded equivalent -- `leading_pad_to_space_padded`
+/// specialized to the default alphabet's zero symbol, `'0'`.
+#[inline(always)]
+fn zero_padded_to_space_padded(buf: &[u8; SERIAL_LEN]) -> [u8; SERIAL_LEN] {
+    leading_pad_to_space_padded(buf, b'0')
+}
+
+/// Write `n` as a `SERIAL_LEN`-byte string in the given `alphabet`'s base (`alphabet.len()`),
+/// right-justified, left-padded with `alphabet[0]` -- the arbitrary-base generalization of
+/// `write_serial` (which is exactly this function specialized to `alphabet = b"0123456789"`).
+/// `alphabet` must be non-empty (checked by the caller, `validate_alphabet`).
+#[inline(always)]
+fn write_candidate(buf: &mut [u8; SERIAL_LEN], mut n: u128, alphabet: &[u8]) {
+    let base = alphabet.len() as u128;
+    for i in (0..SERIAL_LEN).rev() {
+        buf[i] = alphabet[(n % base) as usize];
+        n /= base;
+    }
+}
+
+/// Increment a candidate buffer by 1 in the given `alphabet`'s base -- the arbitrary-base
+/// generalization of `increment_bcd`. Silently wraps to all-`alphabet[0]` on overflow of the
+/// whole buffer (requires `alphabet.len()^SERIAL_LEN` iterations, unreachable in practice).
+#[inline(always)]
+fn increment_candidate(buf: &mut [u8; SERIAL_LEN], alphabet: &[u8]) {
+    let base = alphabet.len();
+    for i in (0..SERIAL_LEN).rev() {
+        let idx = alphabet
+            .iter()
+            .position(|&c| c == buf[i])
+            .expect("buffer byte must be a member of the search alphabet");
+        if idx + 1 < base {
+            buf[i] = alphabet[idx + 1];
+            return;
+        }
+        buf[i] = alphabet[0];
+    }
+}
+
+/// Validate and return a `search --alphabet` value as bytes, or exit with an error.
+///
+/// Requires: non-empty, at least 2 distinct symbols (a 1-symbol "alphabet" can't count),
+/// every symbol a distinct ASCII alphanumeric character (matching `is_valid_serial`'s
+/// charset, minus `-` which wouldn't make sense as a counting digit).
+fn validate_alphabet(alphabet: &str) -> Vec<u8> {
+    let bytes = alphabet.as_bytes().to_vec();
+    if bytes.len() < 2 {
+        eprintln!(
+            "Error: --alphabet must have at least 2 symbols (got {:?})",
+            alphabet
+        );
+        std::process::exit(1);
+    }
+    if !bytes.iter().all(|b| b.is_ascii_alphanumeric()) {
+        eprintln!(
+            "Error: --alphabet '{}' must contain only ASCII letters/digits",
+            alphabet
+        );
+        std::process::exit(1);
+    }
+    let mut sorted = bytes.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    if sorted.len() != bytes.len() {
+        eprintln!(
+            "Error: --alphabet '{}' contains duplicate symbols",
+            alphabet
+        );
+        std::process::exit(1);
+    }
+    bytes
 }
 
 /// Valid Serial characters: `[0-9A-Za-z-]`
@@ -414,12 +512,49 @@ fn is_valid_model(s: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b' ')
 }
 
-/// Build the serial byte array (20 bytes)
-///
-/// - Pure digits: left-pad with '0' (e.g. `"123"` → `"00000000000000000123"`)
-/// - Contains letters: right-pad with spaces (e.g. `"ABCD"` → `"ABCD                "`)
-fn build_serial_bytes(serial: &str) -> [u8; SERIAL_LEN] {
+/// Build the serial byte array (20 bytes), left-padding pure digits with '0'
+/// (e.g. `"123"` → `"00000000000000000123"`). This is one of two real-world-observed
+/// padding conventions -- see `build_serial_bytes_space_pad` for the other. Neither is
+/// universally correct on its own: some real serials are stored literally zero-padded,
+/// while §8.62's live RouterOS boot test showed a real disk's short numeric serial is
+/// space-padded by `keyman` at read time, not zero-padded. `cmd_check` computes both
+/// and reports whichever ones differ, rather than guessing a single convention.
+fn build_serial_bytes_zero_pad(serial: &str) -> [u8; SERIAL_LEN] {
     let sb = serial.as_bytes();
+    warn_serial_len(serial, sb);
+    let is_numeric = !sb.is_empty() && sb.iter().all(|b| b.is_ascii_digit());
+    if is_numeric {
+        let mut bytes = [b'0'; SERIAL_LEN];
+        let copy_len = sb.len().min(SERIAL_LEN);
+        let offset = SERIAL_LEN - copy_len;
+        bytes[offset..].copy_from_slice(&sb[..copy_len]);
+        bytes
+    } else {
+        build_serial_bytes_space_pad(serial)
+    }
+}
+
+/// Build the serial byte array (20 bytes): left-justify the serial text, right-pad with
+/// spaces (e.g. `"123"` → `"123                 "`, `"ABCD"` → `"ABCD                "`).
+///
+/// Confirmed as keyman's own real behavior via disassembly (the 20-byte buffer is
+/// zero-filled, then every remaining zero byte is unconditionally replaced with a space)
+/// and via a real end-to-end RouterOS boot test: changing a live QEMU USB device's
+/// `serial=` property from a pre-padded 20-digit value to a short 7-digit numeric value
+/// ("2142239") produced the SOFTWARE ID matching this space-pad computation, not
+/// zero-pad (docs/investigation/license-internals.md §8.62) -- see
+/// `build_serial_bytes_zero_pad`'s doc comment for why both are still computed.
+fn build_serial_bytes_space_pad(serial: &str) -> [u8; SERIAL_LEN] {
+    let sb = serial.as_bytes();
+    warn_serial_len(serial, sb);
+    let mut bytes = [SPACE_PADDING; SERIAL_LEN];
+    let copy_len = sb.len().min(SERIAL_LEN);
+    bytes[..copy_len].copy_from_slice(&sb[..copy_len]);
+    bytes
+}
+
+/// Shared invalid-character/length warnings for both serial-padding conventions.
+fn warn_serial_len(serial: &str, sb: &[u8]) {
     if !is_valid_serial(serial) {
         eprintln!("Warning: serial '{}' contains invalid characters", serial);
     }
@@ -428,24 +563,6 @@ fn build_serial_bytes(serial: &str) -> [u8; SERIAL_LEN] {
             "Warning: serial '{}' truncated to {} bytes",
             serial, SERIAL_LEN
         );
-    }
-    // `.all()` on an empty slice is vacuously true; treat empty as non-numeric so it
-    // takes the space-padding branch below, matching keyman's zero-fill-then-pad
-    // behavior for an empty disk serial (see the test above for disassembly evidence).
-    let is_numeric = !sb.is_empty() && sb.iter().all(|b| b.is_ascii_digit());
-    if is_numeric {
-        // Pure digits: left-pad with '0'
-        let mut bytes = [b'0'; SERIAL_LEN];
-        let copy_len = sb.len().min(SERIAL_LEN);
-        let offset = SERIAL_LEN - copy_len;
-        bytes[offset..].copy_from_slice(&sb[..copy_len]);
-        bytes
-    } else {
-        // Alphanumeric: right-pad with spaces
-        let mut bytes = [SPACE_PADDING; SERIAL_LEN];
-        let copy_len = sb.len().min(SERIAL_LEN);
-        bytes[..copy_len].copy_from_slice(&sb[..copy_len]);
-        bytes
     }
 }
 
@@ -514,10 +631,11 @@ fn main() {
             identity,
             bus,
             mbr_table,
-            serial_pad,
+            pad,
+            alphabet,
         } => cmd_search(
-            disk_size, unit, threads, model, keys, count, from, identity, bus, mbr_table,
-            serial_pad,
+            disk_size, unit, threads, model, keys, count, from, identity, bus, mbr_table, pad,
+            alphabet,
         ),
         Commands::Sig2key { signature_hex } => cmd_sig2key(&signature_hex),
         Commands::Key2sig { key_file_or_text } => cmd_key2sig(&key_file_or_text),
@@ -559,7 +677,8 @@ fn cmd_search(
     identity: Option<String>,
     bus: BusType,
     mbr_table_path: Option<String>,
-    serial_pad: SerialPad,
+    pad: PadPosition,
+    alphabet: String,
 ) {
     let (total_bytes, size_label) = resolve_disk_size(disk_size, unit, bus);
     let sector_val = sector_val_for_bus(bus, total_bytes);
@@ -569,8 +688,20 @@ fn cmd_search(
             .map(|n| n.get())
             .unwrap_or(4)
     });
-    let use_simd = sha256_simd::is_avx512_supported();
+    let alphabet_bytes = validate_alphabet(&alphabet);
+    let is_default_alphabet = alphabet_bytes == b"0123456789";
+    // The SIMD engine's BCD-nibble increment trick is specific to base-10 -- a non-default
+    // alphabet always runs scalar-only, regardless of AVX-512 availability.
+    let use_simd = is_default_alphabet && sha256_simd::is_avx512_supported();
     let start_serial = from * 1_000_000;
+
+    if !is_default_alphabet {
+        println!(
+            "Note: non-default --alphabet '{}' (base {}) forces scalar mode -- no AVX-512 SIMD.",
+            alphabet,
+            alphabet_bytes.len()
+        );
+    }
 
     verify_6g();
 
@@ -592,7 +723,7 @@ fn cmd_search(
             start_serial,
             use_simd,
             bus,
-            serial_pad,
+            pad,
         );
 
         Arc::new(SearchContext {
@@ -601,7 +732,9 @@ fn cmd_search(
             targets: Arc::new(Vec::new()),
             raw_targets: Some(Arc::new(raw_targets)),
             mbr_table: Some(Arc::new(table)),
-            serial_pad,
+            pad,
+            alphabet: alphabet_bytes,
+            is_default_alphabet,
             mix_lo: 0,
             mix_hi: 0,
             max_collisions: count,
@@ -624,7 +757,7 @@ fn cmd_search(
             use_simd,
             identity.as_deref(),
             bus,
-            serial_pad,
+            pad,
         );
 
         Arc::new(SearchContext {
@@ -633,7 +766,9 @@ fn cmd_search(
             targets: Arc::new(fixed_targets),
             raw_targets: None,
             mbr_table: None,
-            serial_pad,
+            pad,
+            alphabet: alphabet_bytes,
+            is_default_alphabet,
             mix_lo,
             mix_hi,
             max_collisions: count,
@@ -680,7 +815,7 @@ fn print_search_banner(
     use_simd: bool,
     identity: Option<&str>,
     bus: BusType,
-    serial_pad: SerialPad,
+    pad: PadPosition,
 ) {
     let mode_str = if count == 0 {
         "unlimited".to_string()
@@ -718,10 +853,10 @@ fn print_search_banner(
         ),
         None => println!("Identity: 00000000000000000000 (standard, all-zero mix)"),
     }
-    match serial_pad {
-        SerialPad::Zero => println!("Serial pad: zero (left-pad with '0', default)"),
-        SerialPad::Space => {
-            println!("Serial pad: space (right-pad with spaces, natural digit count)")
+    match pad {
+        PadPosition::Start => println!("Serial pad: start (left-pad with '0')"),
+        PadPosition::End => {
+            println!("Serial pad: end (right-pad with spaces, natural digit count, default)")
         }
     }
     println!(
@@ -760,7 +895,7 @@ fn print_sweep_search_banner(
     start_serial: u64,
     use_simd: bool,
     bus: BusType,
-    serial_pad: SerialPad,
+    pad: PadPosition,
 ) {
     let mode_str = if count == 0 {
         "unlimited".to_string()
@@ -786,10 +921,10 @@ fn print_sweep_search_banner(
     println!(
         "Identity: sweeping all 2048 mbr_val values per candidate serial (no fixed --identity)"
     );
-    match serial_pad {
-        SerialPad::Zero => println!("Serial pad: zero (left-pad with '0', default)"),
-        SerialPad::Space => {
-            println!("Serial pad: space (right-pad with spaces, natural digit count)")
+    match pad {
+        PadPosition::Start => println!("Serial pad: start (left-pad with '0')"),
+        PadPosition::End => {
+            println!("Serial pad: end (right-pad with spaces, natural digit count, default)")
         }
     }
     println!(
@@ -848,9 +983,13 @@ fn search_scalar(tid: usize, num_threads: usize, start_serial: u64, ctx: &Search
         }
 
         let mut serial_buf = [b'0'; SERIAL_LEN];
-        write_serial(&mut serial_buf, i);
-        if ctx.serial_pad == SerialPad::Space {
-            serial_buf = zero_padded_to_space_padded(&serial_buf);
+        if ctx.is_default_alphabet {
+            write_serial(&mut serial_buf, i);
+        } else {
+            write_candidate(&mut serial_buf, i as u128, &ctx.alphabet);
+        }
+        if ctx.pad == PadPosition::End {
+            serial_buf = leading_pad_to_space_padded(&serial_buf, ctx.alphabet[0]);
         }
         buf[..SERIAL_LEN].copy_from_slice(&serial_buf);
         let (sid_lo, sid_hi) = sha256::hash_40(&buf);
@@ -932,7 +1071,7 @@ unsafe fn search_simd(tid: usize, num_threads: usize, start_serial: u64, ctx: &S
         let mut lane_serial = base_serial;
         for lane in 0..SIMD_LANES {
             serials[lane] = base + lane as u64;
-            let bytes = if ctx.serial_pad == SerialPad::Space {
+            let bytes = if ctx.pad == PadPosition::End {
                 zero_padded_to_space_padded(&lane_serial)
             } else {
                 lane_serial
@@ -977,9 +1116,13 @@ fn check_match(serial_num: u64, sid_lo: u32, sid_hi: u8, ctx: &SearchContext) {
             let sid = compute_software_id(sid_lo, sid_hi, ctx.mix_lo, ctx.mix_hi);
 
             let mut sbuf = [b'0'; SERIAL_LEN];
-            write_serial(&mut sbuf, serial_num);
-            if ctx.serial_pad == SerialPad::Space {
-                sbuf = zero_padded_to_space_padded(&sbuf);
+            if ctx.is_default_alphabet {
+                write_serial(&mut sbuf, serial_num);
+            } else {
+                write_candidate(&mut sbuf, serial_num as u128, &ctx.alphabet);
+            }
+            if ctx.pad == PadPosition::End {
+                sbuf = leading_pad_to_space_padded(&sbuf, ctx.alphabet[0]);
             }
             let serial_str = std::str::from_utf8(&sbuf).unwrap();
 
@@ -1018,9 +1161,13 @@ fn sweep_check_match(serial_num: u64, sid_lo: u32, sid_hi: u8, ctx: &SearchConte
             let n = ctx.found_count.fetch_add(1, Ordering::Relaxed) + 1;
 
             let mut sbuf = [b'0'; SERIAL_LEN];
-            write_serial(&mut sbuf, serial_num);
-            if ctx.serial_pad == SerialPad::Space {
-                sbuf = zero_padded_to_space_padded(&sbuf);
+            if ctx.is_default_alphabet {
+                write_serial(&mut sbuf, serial_num);
+            } else {
+                write_candidate(&mut sbuf, serial_num as u128, &ctx.alphabet);
+            }
+            if ctx.pad == PadPosition::End {
+                sbuf = leading_pad_to_space_padded(&sbuf, ctx.alphabet[0]);
             }
             let serial_str = std::str::from_utf8(&sbuf).unwrap();
             let (identity_hex, marker_hex) = mbr_table.lookup(mbr_val);
@@ -1124,7 +1271,13 @@ fn print_metadata(signature_hex: &str) {
     }
 }
 
-/// Check whether a given serial matches a known signature
+/// Check whether a given serial matches a known signature.
+///
+/// Computes SOFTWARE ID under BOTH the zero-pad and space-pad serial conventions
+/// whenever they'd actually produce different bytes (pure-digit serial shorter than
+/// `SERIAL_LEN`) -- neither convention is universally correct on real hardware (see
+/// `build_serial_bytes_zero_pad`'s doc comment and docs/license-internals.md §8.62), so
+/// `check` reports both rather than requiring a `--serial-pad`-style flag to pick one.
 fn cmd_check(
     serial: &str,
     disk_size: Option<u64>,
@@ -1140,14 +1293,7 @@ fn cmd_check(
     let model = model.unwrap_or_else(|| format!("ROS{}", size_label));
     let (mix_lo, mix_hi) = resolve_mix(identity.as_deref());
     let search_targets = targets::load_targets(keys.as_deref(), (mix_lo, mix_hi));
-
-    let serial_bytes = build_serial_bytes(serial);
-    let serial_display = std::str::from_utf8(&serial_bytes).unwrap_or(serial);
     let model_bytes = build_model_bytes(&model);
-    let buf = build_input_buf(&serial_bytes, &model_bytes, &sector_val.to_le_bytes());
-
-    let (sid_lo, sid_hi) = sha256::hash_40(&buf);
-    let sid = compute_software_id(sid_lo, sid_hi, mix_lo, mix_hi);
 
     let identity_hex = identity
         .as_deref()
@@ -1161,7 +1307,6 @@ fn cmd_check(
     let marker_hex = format!("{:02X}{:02X}", marker[0], marker[1]);
 
     println!("=== Check ===");
-    println!("Serial: {}", serial_display);
     println!("Model:  {}", model);
     println!("Disk:   {} (SV: 0x{:X})", size_label, sector_val);
     match bus {
@@ -1173,9 +1318,82 @@ fn cmd_check(
     println!("Identity: {}", identity_hex);
     println!("Marker: {}", marker_hex);
     println!("-----------");
+
+    let zero_bytes = build_serial_bytes_zero_pad(serial);
+    let space_bytes = build_serial_bytes_space_pad(serial);
+
+    if zero_bytes == space_bytes {
+        print_check_variant(
+            None,
+            &zero_bytes,
+            &model_bytes,
+            sector_val,
+            mix_lo,
+            mix_hi,
+            &search_targets,
+            license.as_deref(),
+            &identity_hex,
+            &marker_hex,
+        );
+    } else {
+        println!("(zero-pad and space-pad differ for this serial -- computing both, see docs/license-internals.md §8.62)\n");
+        print_check_variant(
+            Some("zero-padded"),
+            &zero_bytes,
+            &model_bytes,
+            sector_val,
+            mix_lo,
+            mix_hi,
+            &search_targets,
+            license.as_deref(),
+            &identity_hex,
+            &marker_hex,
+        );
+        println!();
+        print_check_variant(
+            Some("space-padded"),
+            &space_bytes,
+            &model_bytes,
+            sector_val,
+            mix_lo,
+            mix_hi,
+            &search_targets,
+            license.as_deref(),
+            &identity_hex,
+            &marker_hex,
+        );
+    }
+}
+
+/// Compute and print one `check` result (SOFTWARE ID, license comparison, target match)
+/// for a single already-built serial byte array. `label`, when given, is printed
+/// alongside the `Serial:` line to distinguish the zero-pad/space-pad variants when
+/// `cmd_check` computes both.
+#[allow(clippy::too_many_arguments)]
+fn print_check_variant(
+    label: Option<&str>,
+    serial_bytes: &[u8; SERIAL_LEN],
+    model_bytes: &[u8; MODEL_LEN],
+    sector_val: u32,
+    mix_lo: u32,
+    mix_hi: u32,
+    search_targets: &[targets::Target],
+    license: Option<&str>,
+    identity_hex: &str,
+    marker_hex: &str,
+) {
+    let serial_display = std::str::from_utf8(serial_bytes).unwrap_or("<invalid utf8>");
+    let buf = build_input_buf(serial_bytes, model_bytes, &sector_val.to_le_bytes());
+    let (sid_lo, sid_hi) = sha256::hash_40(&buf);
+    let sid = compute_software_id(sid_lo, sid_hi, mix_lo, mix_hi);
+
+    match label {
+        Some(l) => println!("Serial ({}): {}", l, serial_display),
+        None => println!("Serial: {}", serial_display),
+    }
     println!("Software ID: {}", sid);
 
-    if let Some(path) = license.as_deref() {
+    if let Some(path) = license {
         compare_license_software_id(path, &sid);
     }
 
@@ -1184,7 +1402,7 @@ fn cmd_check(
         .find(|t| ((sid_hi as u32) | 0x100) == t.need_hi && sid_lo == t.need_lo);
 
     if let Some(t) = matched {
-        println!("\n✅ Matched signature: {}", t.name);
+        println!("✅ Matched signature: {}", t.name);
         if t.signature_hex.len() >= 128 {
             println!(
                 "   Signature: {}...{}",
@@ -1196,18 +1414,18 @@ fn cmd_check(
         }
 
         if let Ok(key_text) = convert::signature_to_key_text(&t.signature_hex) {
-            println!("\n   LICENSE KEY:");
+            println!("   LICENSE KEY:");
             for line in key_text.lines() {
                 println!("   {}", line);
             }
         }
 
         println!(
-            "\n   MBR HEX:\n   {}{}00000000{}",
+            "   MBR HEX:\n   {}{}00000000{}",
             identity_hex, marker_hex, t.signature_hex
         );
     } else {
-        println!("\n❌ No match found");
+        println!("❌ No match found");
         println!("   sid_lo=0x{:08X} sid_hi=0x{:02X}", sid_lo, sid_hi);
     }
 }
@@ -1545,6 +1763,89 @@ mod tests {
         }
     }
 
+    // ---- write_candidate / increment_candidate (arbitrary-alphabet `--alphabet`) ----
+
+    #[test]
+    fn test_write_candidate_matches_write_serial_on_default_alphabet() {
+        // write_candidate/increment_candidate must be exact drop-in replacements for
+        // write_serial/increment_bcd when given the default digit alphabet -- this is what
+        // makes the default `--alphabet "0123456789"` path behaviorally identical to the
+        // tool's original (pre-`--alphabet`) behavior.
+        let digits = b"0123456789";
+        for n in [0u128, 1, 9, 10, 99, 100, 999_999_999_990] {
+            let mut a = [0u8; SERIAL_LEN];
+            write_candidate(&mut a, n, digits);
+            let mut b = [0u8; SERIAL_LEN];
+            write_serial(&mut b, n as u64);
+            assert_eq!(a, b, "mismatch at n={}", n);
+        }
+    }
+
+    #[test]
+    fn test_write_candidate_base36() {
+        let alphabet = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let mut buf = [0u8; SERIAL_LEN];
+        write_candidate(&mut buf, 0, alphabet);
+        assert_eq!(&buf, b"00000000000000000000");
+
+        write_candidate(&mut buf, 35, alphabet);
+        assert_eq!(&buf, b"0000000000000000000Z"); // 35 -> last symbol
+
+        write_candidate(&mut buf, 36, alphabet);
+        assert_eq!(&buf, b"00000000000000000010"); // 36 -> carries to the next position
+    }
+
+    #[test]
+    fn test_increment_candidate_base36_carry() {
+        let alphabet = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let mut buf = *b"0000000000000000000Z";
+        increment_candidate(&mut buf, alphabet);
+        assert_eq!(&buf, b"00000000000000000010");
+    }
+
+    #[test]
+    fn test_increment_candidate_consistency_with_write_candidate() {
+        let alphabet = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let base: u128 = 46655; // 35*36^2 + 35*36 + 35 = "0..0ZZZ"
+        let mut buf = [0u8; SERIAL_LEN];
+        write_candidate(&mut buf, base, alphabet);
+
+        for i in 1..=40u128 {
+            increment_candidate(&mut buf, alphabet);
+            let mut expected = [0u8; SERIAL_LEN];
+            write_candidate(&mut expected, base + i, alphabet);
+            assert_eq!(buf, expected, "base-36 mismatch at base+{}", i);
+        }
+    }
+
+    #[test]
+    fn test_leading_pad_to_space_padded_generalizes_zero_padded() {
+        let alphabet = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        // `write_candidate` interprets `n` in base-36, so plain decimal 123 would spell
+        // "3F", not "123" -- pick the base-36 value whose last 3 symbols are literally
+        // '1','2','3': 1*36^2 + 2*36 + 3 = 1371.
+        let mut buf = [0u8; SERIAL_LEN];
+        write_candidate(&mut buf, 1371, alphabet); // "00000000000000000123"
+        let out = leading_pad_to_space_padded(&buf, alphabet[0]);
+        assert_eq!(&out[..3], b"123");
+        assert_eq!(&out[3..], &[SPACE_PADDING; 17]);
+        // Must match the pre-existing zero_padded_to_space_padded exactly for this case.
+        assert_eq!(out, zero_padded_to_space_padded(&buf));
+    }
+
+    // ---- validate_alphabet ----
+
+    #[test]
+    fn test_validate_alphabet_default_ok() {
+        assert_eq!(validate_alphabet("0123456789"), b"0123456789".to_vec());
+    }
+
+    #[test]
+    fn test_validate_alphabet_base36_ok() {
+        let alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        assert_eq!(validate_alphabet(alphabet), alphabet.as_bytes().to_vec());
+    }
+
     // ---- mbr_val search strategy cross-validation (Approach A vs Approach B) ----
     //
     // Two independent ways to find, for a fixed serial/model/size, which `mbr_val`
@@ -1696,7 +1997,7 @@ mod tests {
         for (size_label, total_bytes) in sizes {
             for (bus, bus_label) in [(BusType::Ide, "Ide"), (BusType::Scsi, "Scsi")] {
                 let sector_val = sector_val_for_bus(bus, total_bytes);
-                let serial_bytes = build_serial_bytes(serial);
+                let serial_bytes = build_serial_bytes_zero_pad(serial);
                 let model_bytes = build_model_bytes(model);
                 let buf = build_input_buf(&serial_bytes, &model_bytes, &sector_val.to_le_bytes());
                 let (sid_lo, sid_hi) = sha256::hash_40(&buf);
@@ -1787,30 +2088,49 @@ mod tests {
         assert_eq!(&bytes, b"VMware Virtual I");
     }
 
-    // ---- build_serial_bytes ----
+    // ---- build_serial_bytes_zero_pad / build_serial_bytes_space_pad ----
+    //
+    // `cmd_check` computes BOTH conventions for any serial where they'd actually differ
+    // (pure digits shorter than SERIAL_LEN) rather than guessing one -- see §8.62.
 
     #[test]
-    fn test_build_serial_bytes_numeric_short() {
-        let bytes = build_serial_bytes("123");
+    fn test_build_serial_bytes_zero_pad_numeric_short() {
+        let bytes = build_serial_bytes_zero_pad("123");
         assert_eq!(&bytes, b"00000000000000000123");
     }
 
     #[test]
-    fn test_build_serial_bytes_numeric_full() {
-        let bytes = build_serial_bytes("00000000350481748276");
-        assert_eq!(&bytes, b"00000000350481748276");
+    fn test_build_serial_bytes_space_pad_numeric_short() {
+        // Confirmed against real hardware, not just disassembly -- see §8.62.
+        let bytes = build_serial_bytes_space_pad("123");
+        assert_eq!(&bytes[..3], b"123");
+        assert_eq!(&bytes[3..], &[SPACE_PADDING; 17]);
+    }
+
+    #[test]
+    fn test_build_serial_bytes_zero_and_space_pad_agree_at_full_length() {
+        // Already exactly SERIAL_LEN bytes: no padding applies, so both conventions
+        // produce the identical literal pass-through.
+        let zero = build_serial_bytes_zero_pad("00000000350481748276");
+        let space = build_serial_bytes_space_pad("00000000350481748276");
+        assert_eq!(&zero, b"00000000350481748276");
+        assert_eq!(zero, space);
     }
 
     #[test]
     fn test_build_serial_bytes_alpha_exact() {
-        // 19-char alphanumeric serial: right-padded with one trailing space to fill SERIAL_LEN (20)
-        let bytes = build_serial_bytes("G4HQT594JN8VLY0FGN9");
-        assert_eq!(&bytes, b"G4HQT594JN8VLY0FGN9 ");
+        // 19-char alphanumeric serial: right-padded with one trailing space to fill
+        // SERIAL_LEN (20). Alphanumeric input has no meaningful "zero-pad" form, so
+        // zero_pad falls back to the same space-pad result as space_pad directly.
+        let zero = build_serial_bytes_zero_pad("G4HQT594JN8VLY0FGN9");
+        let space = build_serial_bytes_space_pad("G4HQT594JN8VLY0FGN9");
+        assert_eq!(&space, b"G4HQT594JN8VLY0FGN9 ");
+        assert_eq!(zero, space);
     }
 
     #[test]
     fn test_build_serial_bytes_alpha_short() {
-        let bytes = build_serial_bytes("SZHYPO14090903D0164");
+        let bytes = build_serial_bytes_space_pad("SZHYPO14090903D0164");
         // 19 chars + 1 space padding on right
         assert_eq!(&bytes[..19], b"SZHYPO14090903D0164");
         assert_eq!(bytes[19], SPACE_PADDING);
@@ -1818,7 +2138,7 @@ mod tests {
 
     #[test]
     fn test_build_serial_bytes_with_hyphen() {
-        let bytes = build_serial_bytes("HYSSD-20160419B7902");
+        let bytes = build_serial_bytes_space_pad("HYSSD-20160419B7902");
         assert_eq!(&bytes[..19], b"HYSSD-20160419B7902");
         assert_eq!(bytes[19], SPACE_PADDING);
     }
@@ -1829,9 +2149,13 @@ mod tests {
         // sweeps the whole buffer turning every zero byte into a space -- an empty
         // (zero-length) serial therefore becomes 20 ASCII spaces, not 20 '0' chars.
         // Confirmed via keyman_x86_7.24.1 disassembly (zero-fill at 0x8050411-0x805041e,
-        // pad loop at 0x8050a1e-0x8050a29, which never special-cases length 0).
-        let bytes = build_serial_bytes("");
-        assert_eq!(&bytes, &[SPACE_PADDING; SERIAL_LEN]);
+        // pad loop at 0x8050a1e-0x8050a29, which never special-cases length 0). Both
+        // functions must agree here: zero_pad's `is_numeric` check treats empty as
+        // non-numeric and falls back to space_pad, matching keyman's real behavior.
+        let zero = build_serial_bytes_zero_pad("");
+        let space = build_serial_bytes_space_pad("");
+        assert_eq!(&zero, &[SPACE_PADDING; SERIAL_LEN]);
+        assert_eq!(zero, space);
     }
 
     // ---- parse_identity_hex / resolve_mix ----
@@ -1915,7 +2239,9 @@ mod tests {
             targets: Arc::new(targets),
             raw_targets: None,
             mbr_table: None,
-            serial_pad: SerialPad::Zero,
+            pad: PadPosition::Start,
+            alphabet: b"0123456789".to_vec(),
+            is_default_alphabet: true,
             mix_lo,
             mix_hi,
             max_collisions: 0,
@@ -1980,9 +2306,9 @@ mod tests {
             signature_hex: "00".repeat(64),
         };
 
-        // With --serial-pad space, search_scalar must find it at serial index 7.
+        // With --pad end, search_scalar must find it at serial index 7.
         let mut ctx = make_test_ctx(vec![make_target()]);
-        ctx.serial_pad = SerialPad::Space;
+        ctx.pad = PadPosition::End;
         ctx.max_collisions = 1;
         ctx.model_bytes = model_bytes;
         ctx.sv_bytes = sv_bytes;
@@ -1990,11 +2316,64 @@ mod tests {
         assert_eq!(ctx.found_count.load(Ordering::Relaxed), 1);
         assert!(ctx.stop.load(Ordering::Relaxed));
 
-        // The same target's hash must NOT be produced by the default zero-padded serial=7
+        // The same target's hash must NOT be produced by the start-padded serial=7
         // ("00000000000000000007") -- confirms the two padding modes genuinely diverge.
         let zero_input_buf = build_input_buf(&zero_buf, &model_bytes, &sv_bytes);
         let (zero_sid_lo, zero_sid_hi) = sha256::hash_40(&zero_input_buf);
         assert!(zero_sid_lo != need_lo || ((zero_sid_hi as u32) | 0x100) != need_hi);
+    }
+
+    #[test]
+    fn test_search_scalar_finds_target_with_custom_alphabet() {
+        // End-to-end check that `search_scalar` actually branches on `ctx.alphabet` /
+        // `ctx.is_default_alphabet` and uses `write_candidate` (base-36), not the default
+        // `write_serial` (base-10) path, when a non-default `--alphabet` is configured.
+        let alphabet = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_vec();
+        let model_bytes = [SPACE_PADDING; MODEL_LEN];
+        let sv_bytes = [0u8; 4];
+
+        // Candidate index 46, in base-36, is 1*36 + 10 -> the last two symbols are
+        // alphabet[1]='1' and alphabet[10]='A', i.e. "...001A" -- genuinely requires a
+        // letter and is unambiguously different from write_serial(46)'s base-10 "...0046".
+        let idx: u128 = 46;
+        let mut target_buf = [0u8; SERIAL_LEN];
+        write_candidate(&mut target_buf, idx, &alphabet);
+        assert!(
+            target_buf.contains(&b'A') || !target_buf.iter().all(|b| b.is_ascii_digit()),
+            "sanity: base-36 index {} should not be pure-decimal-equivalent to base-10 {}",
+            idx,
+            idx
+        );
+
+        let buf = build_input_buf(&target_buf, &model_bytes, &sv_bytes);
+        let (sid_lo, sid_hi) = sha256::hash_40(&buf);
+        let need_lo = sid_lo;
+        let need_hi = (sid_hi as u32) | 0x100;
+        let make_target = || targets::Target {
+            need_lo,
+            need_hi,
+            name: "ALPHABET-TEST".to_string(),
+            signature_hex: "00".repeat(64),
+        };
+
+        let mut ctx = make_test_ctx(vec![make_target()]);
+        ctx.alphabet = alphabet.clone();
+        ctx.is_default_alphabet = false;
+        ctx.pad = PadPosition::Start;
+        ctx.max_collisions = 1;
+        ctx.model_bytes = model_bytes;
+        ctx.sv_bytes = sv_bytes;
+        search_scalar(0, 1, idx as u64, &ctx);
+        assert_eq!(ctx.found_count.load(Ordering::Relaxed), 1);
+        assert!(ctx.stop.load(Ordering::Relaxed));
+
+        // Confirm the default (base-10) path does NOT produce this same hash at the same
+        // loop index -- proving the two candidate-generation paths genuinely diverge.
+        let mut default_buf = [b'0'; SERIAL_LEN];
+        write_serial(&mut default_buf, idx as u64);
+        let default_input_buf = build_input_buf(&default_buf, &model_bytes, &sv_bytes);
+        let (default_sid_lo, default_sid_hi) = sha256::hash_40(&default_input_buf);
+        assert!(default_sid_lo != need_lo || ((default_sid_hi as u32) | 0x100) != need_hi);
     }
 
     #[test]
