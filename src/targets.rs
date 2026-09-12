@@ -86,8 +86,8 @@ pub fn mbr_mix() -> (u32, u32) {
 fn raw16_from_identity(identity: &[u8; 10]) -> u16 {
     let sha_val = crate::sha256::hash_10(identity);
     let mut sum: u16 = 0;
-    for chunk in identity.chunks_exact(2) {
-        sum = sum.wrapping_add(u16::from_le_bytes([chunk[0], chunk[1]]));
+    for chunk in identity.as_chunks::<2>().0 {
+        sum = sum.wrapping_add(u16::from_le_bytes(*chunk));
     }
     let chksum = !sum;
     sha_val ^ chksum

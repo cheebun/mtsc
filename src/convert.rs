@@ -127,8 +127,8 @@ pub(crate) fn decode_verify_inputs(signature_hex: &str) -> Result<VerifyInputs, 
 /// which are the same table `MT_Transform` uses (confirmed against MTLic's `MTTools.py`).
 fn mt_transform(block: &mut [u8; 16]) {
     let mut s = [0u32; 4];
-    for (w, chunk) in s.iter_mut().zip(block.chunks_exact(4)) {
-        *w = u32::from_be_bytes(chunk.try_into().unwrap());
+    for (w, chunk) in s.iter_mut().zip(block.as_chunks::<4>().0) {
+        *w = u32::from_be_bytes(*chunk);
     }
 
     for i in 0..16 {
@@ -152,7 +152,7 @@ fn mt_transform(block: &mut [u8; 16]) {
         s[p] = (s[t].rotate_left(k3 & 0x0F) ^ s[p]).wrapping_add(s[t]);
     }
 
-    for (chunk, w) in block.chunks_exact_mut(4).zip(s.iter()) {
+    for (chunk, w) in block.as_chunks_mut::<4>().0.iter_mut().zip(s.iter()) {
         chunk.copy_from_slice(&w.to_be_bytes());
     }
 }
