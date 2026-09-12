@@ -112,10 +112,10 @@ enum Commands {
         /// ("0123456789"), giving pure decimal counting identical to this tool's original
         /// behavior. Pass a wider alphabet (e.g. "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ", base
         /// 36) to search alphanumeric candidates -- useful when a real target serial contains
-        /// letters. NOTE: a non-default alphabet forces scalar mode (no AVX-512 SIMD) -- the
-        /// SIMD engine's BCD-nibble increment trick is specific to base-10; only the default
-        /// alphabet gets full SIMD throughput. A non-default alphabet also makes the
-        /// effective search space enormous (alphabet_len^20) -- in practice only the
+        /// letters. Gets full AVX-512 SIMD throughput regardless of alphabet (candidate
+        /// generation is plain scalar code either way; only the SHA-256 hashing itself is
+        /// SIMD-accelerated, and that's alphabet-agnostic). A non-default alphabet does make
+        /// the effective search space enormous (alphabet_len^20) -- in practice only the
         /// low-order ~12 positions (bounded by u64 candidate-counter width) actually vary;
         /// higher positions stay fixed at `alphabet[0]`, acting as an implicit prefix.
         #[arg(long = "alphabet", default_value = "0123456789")]
@@ -690,14 +690,16 @@ fn cmd_search(
     });
     let alphabet_bytes = validate_alphabet(&alphabet);
     let is_default_alphabet = alphabet_bytes == b"0123456789";
-    // The SIMD engine's BCD-nibble increment trick is specific to base-10 -- a non-default
-    // alphabet always runs scalar-only, regardless of AVX-512 availability.
-    let use_simd = is_default_alphabet && sha256_simd::is_avx512_supported();
+    // Candidate generation (write_candidate/increment_candidate) is plain scalar code
+    // regardless of alphabet -- only `sha256_simd::hash_40_x16`'s actual SHA-256 rounds are
+    // AVX-512-accelerated, and those don't care what the serial bytes represent. So a
+    // non-default alphabet gets full SIMD throughput too, same as the default one.
+    let use_simd = sha256_simd::is_avx512_supported();
     let start_serial = from * 1_000_000;
 
     if !is_default_alphabet {
         println!(
-            "Note: non-default --alphabet '{}' (base {}) forces scalar mode -- no AVX-512 SIMD.",
+            "Note: non-default --alphabet '{}' (base {})",
             alphabet,
             alphabet_bytes.len()
         );
@@ -1045,9 +1047,16 @@ unsafe fn search_simd(tid: usize, num_threads: usize, start_serial: u64, ctx: &S
         inputs[lane][SERIAL_LEN + MODEL_LEN..].copy_from_slice(&ctx.sv_bytes);
     }
 
-    // BCD counter
+    // Candidate counter (BCD for the default alphabet, generic base-N otherwise -- see
+    // `search_scalar` for why this branch is cheap: it's plain scalar code either way,
+    // only `sha256_simd::hash_40_x16` below is actually AVX-512-accelerated, so supporting
+    // a custom alphabet here costs nothing extra relative to the default path).
     let mut base_serial = [b'0'; SERIAL_LEN];
-    write_serial(&mut base_serial, base);
+    if ctx.is_default_alphabet {
+        write_serial(&mut base_serial, base);
+    } else {
+        write_candidate(&mut base_serial, base as u128, &ctx.alphabet);
+    }
 
     let sweep_mode = ctx.raw_targets.is_some();
 
@@ -1072,12 +1081,16 @@ unsafe fn search_simd(tid: usize, num_threads: usize, start_serial: u64, ctx: &S
         for lane in 0..SIMD_LANES {
             serials[lane] = base + lane as u64;
             let bytes = if ctx.pad == PadPosition::End {
-                zero_padded_to_space_padded(&lane_serial)
+                leading_pad_to_space_padded(&lane_serial, ctx.alphabet[0])
             } else {
                 lane_serial
             };
             inputs[lane][..SERIAL_LEN].copy_from_slice(&bytes);
-            increment_bcd(&mut lane_serial);
+            if ctx.is_default_alphabet {
+                increment_bcd(&mut lane_serial);
+            } else {
+                increment_candidate(&mut lane_serial, &ctx.alphabet);
+            }
         }
 
         // 16-way parallel SHA-256
@@ -1093,13 +1106,19 @@ unsafe fn search_simd(tid: usize, num_threads: usize, start_serial: u64, ctx: &S
         }
 
         base += step;
-        // BCD stepping is faster than 20 divisions (step is usually < 256)
+        // BCD/candidate stepping is faster than a full re-derivation (step is usually < 256)
         if step <= 256 {
             for _ in 0..step {
-                increment_bcd(&mut base_serial);
+                if ctx.is_default_alphabet {
+                    increment_bcd(&mut base_serial);
+                } else {
+                    increment_candidate(&mut base_serial, &ctx.alphabet);
+                }
             }
-        } else {
+        } else if ctx.is_default_alphabet {
             write_serial(&mut base_serial, base);
+        } else {
+            write_candidate(&mut base_serial, base as u128, &ctx.alphabet);
         }
 
         if tid == 0 && (base / PROGRESS_INTERVAL) != ((base - step) / PROGRESS_INTERVAL) {
@@ -2374,6 +2393,81 @@ mod tests {
         let default_input_buf = build_input_buf(&default_buf, &model_bytes, &sv_bytes);
         let (default_sid_lo, default_sid_hi) = sha256::hash_40(&default_input_buf);
         assert!(default_sid_lo != need_lo || ((default_sid_hi as u32) | 0x100) != need_hi);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn test_search_simd_finds_target_with_custom_alphabet() {
+        // Mirrors test_search_scalar_finds_target_with_custom_alphabet above, but exercises
+        // `search_simd` directly -- confirms the AVX-512 engine's candidate generation
+        // (write_candidate/increment_candidate) also genuinely branches on ctx.alphabet /
+        // ctx.is_default_alphabet, and that the SIMD hashing path (sha256_simd::hash_40_x16)
+        // produces byte-identical results to the scalar path for a non-default alphabet.
+        // Skips (rather than fails) on CPUs without AVX-512, since search_simd's safety
+        // contract requires the caller to ensure AVX-512F/BW support.
+        if !sha256_simd::is_avx512_supported() {
+            eprintln!("skipping test_search_simd_finds_target_with_custom_alphabet: AVX-512 not supported on this CPU");
+            return;
+        }
+
+        let alphabet = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_vec();
+        let model_bytes = [SPACE_PADDING; MODEL_LEN];
+        let sv_bytes = [0u8; 4];
+
+        // Candidate index 40, in base-36, is 1*36 + 4 -> the last two symbols are
+        // alphabet[1]='1' and alphabet[4]='4', i.e. "...0014" -- lands in lane 0 of the
+        // first 16-lane SIMD batch when start_serial == idx.
+        let idx: u128 = 40;
+        let mut target_buf = [0u8; SERIAL_LEN];
+        write_candidate(&mut target_buf, idx, &alphabet);
+        assert!(
+            !target_buf.iter().all(|b| b.is_ascii_digit()) || target_buf.contains(&b'4'),
+            "sanity: base-36 index {} should differ from write_serial's base-10 encoding",
+            idx
+        );
+
+        let buf = build_input_buf(&target_buf, &model_bytes, &sv_bytes);
+        let (sid_lo, sid_hi) = sha256::hash_40(&buf);
+        let need_lo = sid_lo;
+        let need_hi = (sid_hi as u32) | 0x100;
+
+        let mut ctx = make_test_ctx(vec![targets::Target {
+            need_lo,
+            need_hi,
+            name: "SIMD-ALPHABET-TEST".to_string(),
+            signature_hex: "00".repeat(64),
+        }]);
+        ctx.alphabet = alphabet.clone();
+        ctx.is_default_alphabet = false;
+        ctx.pad = PadPosition::Start;
+        ctx.max_collisions = 1;
+        ctx.model_bytes = model_bytes;
+        ctx.sv_bytes = sv_bytes;
+
+        // Safety: gated on sha256_simd::is_avx512_supported() above.
+        unsafe {
+            search_simd(0, 1, idx as u64, &ctx);
+        }
+
+        assert_eq!(ctx.found_count.load(Ordering::Relaxed), 1);
+        assert!(ctx.stop.load(Ordering::Relaxed));
+
+        // Cross-check against the scalar engine: same alphabet/context, same target, same
+        // start index -- both engines must agree on the hit.
+        let mut ctx_scalar = make_test_ctx(vec![targets::Target {
+            need_lo,
+            need_hi,
+            name: "SIMD-ALPHABET-TEST".to_string(),
+            signature_hex: "00".repeat(64),
+        }]);
+        ctx_scalar.alphabet = alphabet;
+        ctx_scalar.is_default_alphabet = false;
+        ctx_scalar.pad = PadPosition::Start;
+        ctx_scalar.max_collisions = 1;
+        ctx_scalar.model_bytes = model_bytes;
+        ctx_scalar.sv_bytes = sv_bytes;
+        search_scalar(0, 1, idx as u64, &ctx_scalar);
+        assert_eq!(ctx_scalar.found_count.load(Ordering::Relaxed), 1);
     }
 
     #[test]
