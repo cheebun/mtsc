@@ -91,3 +91,72 @@ pub fn verify(
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_our_known_good_ti09_7wk3_signature() {
+        // TI09-7WK3's signature from keys.toml, already confirmed valid via real hardware
+        // activation (§8.14) and independently confirmed to decode to the right SOFTWARE-ID/
+        // level via the ARX cipher (docs/license-internals.md §8.32 step 1). This is the
+        // decisive test: it must return `true`.
+        let sig_hex = "E67A8F47AE86672FAE6D91DF19221453B34FE40E23F19E917107C449DDCB1D2061521816AD7730671B4CB226F1B0DB7448923C6297C49BDB3CCBF40AECBBCF0B";
+        let (decoded_payload, nonce_hash, signature) =
+            crate::convert::decode_verify_inputs(sig_hex).unwrap();
+
+        assert!(
+            verify(
+                &decoded_payload,
+                &nonce_hash,
+                &signature,
+                &LICENSE_PUBLIC_KEY
+            ),
+            "EC-KCDSA verify failed against a known-good, hardware-confirmed signature"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_tampered_signature() {
+        let sig_hex = "E67A8F47AE86672FAE6D91DF19221453B34FE40E23F19E917107C449DDCB1D2061521816AD7730671B4CB226F1B0DB7448923C6297C49BDB3CCBF40AECBBCF0B";
+        let (decoded_payload, nonce_hash, mut signature) =
+            crate::convert::decode_verify_inputs(sig_hex).unwrap();
+        signature[0] ^= 0xFF; // flip a byte -- must no longer verify
+        assert!(!verify(
+            &decoded_payload,
+            &nonce_hash,
+            &signature,
+            &LICENSE_PUBLIC_KEY
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_wrong_public_key() {
+        let sig_hex = "E67A8F47AE86672FAE6D91DF19221453B34FE40E23F19E917107C449DDCB1D2061521816AD7730671B4CB226F1B0DB7448923C6297C49BDB3CCBF40AECBBCF0B";
+        let (decoded_payload, nonce_hash, signature) =
+            crate::convert::decode_verify_inputs(sig_hex).unwrap();
+        let mut wrong_key = LICENSE_PUBLIC_KEY;
+        wrong_key[0] ^= 0xFF;
+        assert!(!verify(
+            &decoded_payload,
+            &nonce_hash,
+            &signature,
+            &wrong_key
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_tampered_payload() {
+        let sig_hex = "E67A8F47AE86672FAE6D91DF19221453B34FE40E23F19E917107C449DDCB1D2061521816AD7730671B4CB226F1B0DB7448923C6297C49BDB3CCBF40AECBBCF0B";
+        let (mut decoded_payload, nonce_hash, signature) =
+            crate::convert::decode_verify_inputs(sig_hex).unwrap();
+        decoded_payload[0] ^= 0xFF;
+        assert!(!verify(
+            &decoded_payload,
+            &nonce_hash,
+            &signature,
+            &LICENSE_PUBLIC_KEY
+        ));
+    }
+}

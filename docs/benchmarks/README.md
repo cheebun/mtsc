@@ -111,3 +111,41 @@ lockfile snapshots are deliberately not stored in Git. The tables above preserve
 the historical results, not a currently runnable benchmark suite.
 
 See [current backend design and runtime verification](../reference/sha256-backends.md).
+
+## Future optimization opportunities (not yet implemented)
+
+Identified 2026-09-13 while reviewing PR #5's new SHA-256 backends. Neither item
+below is about the hash function itself -- both are in the surrounding `search`
+loop, which this doc's own tables explicitly exclude ("Neither includes target
+lookup... not full search throughput", above). For the common case of running
+`search` *without* `--identity` (full mbr_val-sweep mode, the default), these
+likely matter more than which SHA-256 backend is selected:
+
+1. **`sweep_check_match`'s per-candidate target scan is unvectorized scalar code
+   and is the dominant cost in sweep mode, not the hash.** Every candidate (even
+   ones produced 16-at-a-time by an AVX-512 hash batch) is checked against every
+   loaded `keys.toml` target one at a time in a plain `for` loop
+   (`required_mix`/`feasible_mbr_val`, both O(1) per target already -- see
+   `src/targets.rs` -- but the O(num_targets) outer loop itself is not SIMD).
+   Empirically, a real sweep-mode run against 1038 targets measured only
+   ~2.1 M candidates/s even with the AVX-512 hash engine active -- far below
+   what the hash alone can do (compare to the hash-only numbers above), because
+   this scan dominates. `required_mix`'s XOR/combine and `feasible_mbr_val`'s
+   64-bit multiply-and-compare are both vectorizable; batching either across
+   multiple targets or across a whole 16-lane hash result before falling back
+   to scalar per-hit confirmation is the most promising next step for sweep-mode
+   throughput -- likely a bigger win than adding further hash backends, since
+   fixed-`--identity` mode (which has a cheap O(1) `hi_lookup` pre-filter
+   already) doesn't have this bottleneck at all.
+2. **`increment_candidate`'s per-symbol carry step does an O(alphabet-length)
+   linear `.position()` scan** to find a byte's index in the configured
+   `--alphabet` (`src/main.rs`) -- cheap for the default 10-symbol alphabet, more
+   noticeable for longer ones (e.g. the 36-symbol digit+letter alphabet). A
+   precomputed 256-entry reverse lookup table (byte -> alphabet index, built
+   once per `search` invocation, not per candidate) would make this O(1),
+   mirroring the `sid_hi` lookup-table pattern already used elsewhere in this
+   project. Not yet measured as a real bottleneck (a live A/B benchmark this
+   session found no consistent difference between the default and a custom
+   alphabet's overall throughput, likely because item 1 above dominates first),
+   but it's a straightforward, low-risk fix if sweep-mode's cost is ever brought
+   down enough for this to start showing up.

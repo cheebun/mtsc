@@ -175,3 +175,54 @@ fn compress(padded: &[u8; 64]) -> [u32; 8] {
         h.wrapping_add(INITIAL_HASH_VALUES[7]),
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify the known correct value for the 6G VMware scheme
+    #[test]
+    fn test_6g_known_hash() {
+        let mut buf = [0x20u8; 40];
+        buf[..20].copy_from_slice(b"00000000000000000001");
+        buf[20..36].copy_from_slice(b"VMware Virtual I");
+        buf[36..40].copy_from_slice(&0x1800u32.to_le_bytes());
+
+        let (sid_lo, sid_hi) = hash_40(&buf);
+        assert_eq!(sid_lo, 0x0B49EC2E, "sid_lo mismatch");
+        assert_eq!(sid_hi, 0x35, "sid_hi mismatch");
+    }
+
+    /// `mikro_sha256_digest`'s first word must agree with `hash_40`'s `sid_lo` derivation
+    /// (both read the same underlying compression output, just via different accessors) --
+    /// a consistency check between the general digest function and the specialized one.
+    #[test]
+    fn test_mikro_sha256_digest_agrees_with_hash_40() {
+        let mut buf = [0x20u8; 40];
+        buf[..20].copy_from_slice(b"00000000000000000001");
+        buf[20..36].copy_from_slice(b"VMware Virtual I");
+        buf[36..40].copy_from_slice(&0x1800u32.to_le_bytes());
+
+        let (sid_lo, sid_hi) = hash_40(&buf);
+
+        // hash_40's padding for a 40-byte input (data + 0x80 + zeros + 8-byte bit-length
+        // 0x0140) is identical to what mikro_sha256_digest computes generically, so the two
+        // must produce the same digest for this input.
+        let digest = mikro_sha256_digest(&buf);
+        let digest_sid_lo = u32::from_le_bytes(digest[0..4].try_into().unwrap());
+        assert_eq!(digest_sid_lo, sid_lo);
+        assert_eq!(digest[4], sid_hi);
+    }
+
+    /// Verify hash_10's raw sha_val for the standard all-zero identity. Combined with
+    /// chksum=0xFFFF (all-zero words) via XOR and masked to 11 bits, this must reduce to
+    /// mbr_val=0x0BD -- the well-established standard/collision-search mix value.
+    #[test]
+    fn test_hash_10_all_zero_identity() {
+        let sha_val = hash_10(&[0u8; 10]);
+        assert_eq!(sha_val, 0x1742);
+        let chksum: u16 = 0xFFFF; // NOT(sum of 5 all-zero LE u16 words)
+        let mbr_val = ((sha_val ^ chksum) as u32) & 0x7FF;
+        assert_eq!(mbr_val, 0x0BD, "must match the known standard mbr_val");
+    }
+}

@@ -214,3 +214,123 @@ pub fn is_avx512_supported() -> bool {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that the SIMD version produces the same output as the scalar version.
+    ///
+    /// Ported from the pre-refactor test, which compared against a dedicated
+    /// `sha256_scalar` test-only module; that module no longer exists (deleted along with
+    /// the rest of the test suite during the PR #5 merge), so this now compares directly
+    /// against the production scalar reference `crate::sha256::hash_40` -- the same
+    /// reference `HashEngine::self_check` itself uses, and arguably a stronger check since
+    /// it validates against the actual shipped implementation rather than a parallel copy.
+    #[test]
+    fn test_simd_matches_scalar() {
+        if !is_avx512_supported() {
+            eprintln!("SKIP: AVX-512 not supported on this CPU");
+            return;
+        }
+
+        let model = b"VMware Virtual I";
+        let sv: u32 = 0x1800;
+        let const_w = crate::sha256_backend::precompute_constant_words(model, &sv.to_le_bytes());
+
+        let mut inputs = [[0x20u8; 40]; 16];
+        let mut expected_lo = [0u32; 16];
+        let mut expected_hi = [0u8; 16];
+
+        for (lane, ((input, lo_out), hi_out)) in inputs
+            .iter_mut()
+            .zip(expected_lo.iter_mut())
+            .zip(expected_hi.iter_mut())
+            .enumerate()
+        {
+            let serial = format!("{:020}", lane);
+            input[..20].copy_from_slice(serial.as_bytes());
+            input[20..36].copy_from_slice(model);
+            input[36..40].copy_from_slice(&sv.to_le_bytes());
+
+            let (lo, hi) = crate::sha256::hash_40(<&[u8; 40]>::try_from(&input[..]).unwrap());
+            *lo_out = lo;
+            *hi_out = hi;
+        }
+
+        let result = unsafe { hash_40_x16(&inputs, &const_w) };
+
+        for (lane, (((&actual_lo, &actual_hi), &exp_lo), &exp_hi)) in result
+            .sid_lo
+            .iter()
+            .zip(result.sid_hi.iter())
+            .zip(expected_lo.iter())
+            .zip(expected_hi.iter())
+            .enumerate()
+        {
+            assert_eq!(actual_lo, exp_lo, "sid_lo mismatch at lane {}", lane);
+            assert_eq!(actual_hi, exp_hi, "sid_hi mismatch at lane {}", lane);
+        }
+    }
+
+    /// Verify the 6G VMware known value (lane 1 = serial "00000000000000000001")
+    #[test]
+    fn test_simd_6g_known() {
+        if !is_avx512_supported() {
+            eprintln!("SKIP: AVX-512 not supported on this CPU");
+            return;
+        }
+
+        let model = b"VMware Virtual I";
+        let sv_bytes = 0x1800u32.to_le_bytes();
+        let const_w = crate::sha256_backend::precompute_constant_words(model, &sv_bytes);
+
+        let mut inputs = [[0x20u8; 40]; 16];
+        for (lane, input) in inputs.iter_mut().enumerate() {
+            let serial = format!("{:020}", lane);
+            input[..20].copy_from_slice(serial.as_bytes());
+            input[20..36].copy_from_slice(model);
+            input[36..40].copy_from_slice(&sv_bytes);
+        }
+
+        let result = unsafe { hash_40_x16(&inputs, &const_w) };
+        assert_eq!(result.sid_lo[1], 0x0B49EC2E, "sid_lo mismatch for 6G");
+        assert_eq!(result.sid_hi[1], 0x35, "sid_hi mismatch for 6G");
+    }
+
+    /// Verify SIMD byte-order conversion correctness.
+    ///
+    /// The pre-refactor test called a standalone `load_be_word_simd` helper that no longer
+    /// exists: the gather-based rewrite (`H3`, see module docs) inlined that logic directly
+    /// into `hash_40_x16` as `_mm512_i32gather_epi32` + `_mm512_shuffle_epi8(_, bswap)`,
+    /// with no separate per-word loader left to call. This exercises the same underlying
+    /// primitive (`bswap_mask_epi32` + `_mm512_shuffle_epi8`) that both the message-word
+    /// load and the `sid_lo` result extraction rely on, so it still verifies the identical
+    /// byte-order-conversion behavior the original test was protecting.
+    #[test]
+    fn test_byte_order_conversion_bswap_mask() {
+        if !is_avx512_supported() {
+            eprintln!("SKIP: AVX-512 not supported on this CPU");
+            return;
+        }
+
+        unsafe {
+            let mask = bswap_mask_epi32();
+            // Write known value [0x41, 0x42, 0x43, 0x44] = "ABCD" at lane 0 offset 0, in
+            // the same forward byte order `hash_40_x16` reads message bytes from memory.
+            let mut bytes = [0u8; 64];
+            bytes[0] = 0x41;
+            bytes[1] = 0x42;
+            bytes[2] = 0x43;
+            bytes[3] = 0x44;
+            let loaded = _mm512_loadu_si512(bytes.as_ptr() as *const __m512i);
+            let swapped = _mm512_shuffle_epi8(loaded, mask);
+
+            let mut vals = [0u32; 16];
+            _mm512_storeu_si512(vals.as_mut_ptr() as *mut __m512i, swapped);
+
+            // Big-endian "ABCD" = 0x41424344
+            assert_eq!(vals[0], 0x41424344, "BE conversion mismatch");
+        }
+    }
+}

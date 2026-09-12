@@ -301,3 +301,301 @@ fn entries_to_targets(entries: &[KeyEntry], mix: (u32, u32)) -> Vec<Target> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writes `content` to a fresh temp file and returns its path, for `load_from_file`
+    /// tests that need a real path on disk (it checks `Path::exists` up front).
+    fn write_temp_keys_toml(name: &str, content: &str) -> String {
+        let path =
+            std::env::temp_dir().join(format!("mtsc_test_{}_{}.toml", name, std::process::id()));
+        fs::write(&path, content).expect("write temp keys.toml");
+        path.to_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn test_load_from_file_standard_multiline_format() {
+        let path = write_temp_keys_toml(
+            "multiline",
+            "[[key]]\nsoftware_id = \"TEST-0001\"\nsignature_hex = \"AA\"\n",
+        );
+        let entries = load_from_file(&path).expect("file should parse");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].software_id, "TEST-0001");
+        assert_eq!(entries[0].signature_hex, "AA");
+        let _ = fs::remove_file(path);
+    }
+
+    /// Real TOML (via the `toml` crate) accepts an inline array-of-tables -- one line per
+    /// key -- which the old hand-rolled line scanner could never support (it required
+    /// `[[key]]` alone on its own line). This is the compact single-line-per-key form.
+    #[test]
+    fn test_load_from_file_compact_inline_array_of_tables() {
+        let path = write_temp_keys_toml(
+            "inline",
+            r#"key = [
+    { software_id = "TEST-0001", signature_hex = "AA" },
+    { software_id = "TEST-0002", signature_hex = "BB" },
+]
+"#,
+        );
+        let entries = load_from_file(&path).expect("file should parse");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].software_id, "TEST-0001");
+        assert_eq!(entries[1].software_id, "TEST-0002");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_mix_from_identity_matches_standard_all_zero() {
+        // The standard all-zero identity used by collision search must reduce to
+        // the same fixed mix as mbr_mix()'s hardcoded MBR_MIX constant.
+        let (lo, hi) = mix_from_identity(&[0u8; 10]);
+        let (std_lo, std_hi) = mbr_mix();
+        assert_eq!((lo, hi), (std_lo, std_hi));
+    }
+
+    #[test]
+    fn test_mix_from_identity_deterministic() {
+        let identity = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA];
+        let a = mix_from_identity(&identity);
+        let b = mix_from_identity(&identity);
+        assert_eq!(a, b, "same identity must produce same mix");
+    }
+
+    #[test]
+    fn test_mix_from_identity_differs_from_standard() {
+        // A non-zero identity should (overwhelmingly likely) produce a different mix
+        // than the standard all-zero one.
+        let identity = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA];
+        assert_ne!(mix_from_identity(&identity), mbr_mix());
+    }
+
+    #[test]
+    fn test_marker_from_identity_matches_standard_all_zero() {
+        // The all-zero identity's marker is the familiar "standard" BD E8 -- not an
+        // independent convention, but this exact formula's output for this input.
+        assert_eq!(marker_from_identity(&[0u8; 10]), [0xBD, 0xE8]);
+    }
+
+    #[test]
+    fn test_marker_from_identity_matches_real_devices() {
+        // docs/mbr-data.md real-hardware captures -- WUB2-EYCK and HCC0-4FJR are each
+        // independently confirmed by a real `nlevel` activation (this session), not just
+        // a formula match; ER1G-WVEL and ZJ3M-ESHW are formula-only cross-checks.
+        let cases: [(&str, [u8; 2]); 4] = [
+            (
+                "13053023E906092F2175", // WUB2-EYCK
+                [0xA3, 0x89],
+            ),
+            (
+                "75437493726136326185", // HCC0-4FJR
+                [0x33, 0x20],
+            ),
+            (
+                "3836311F7DD5092F2175", // ER1G-WVEL
+                [0xD3, 0x53],
+            ),
+            (
+                "32836785814746803233", // ZJ3M-ESHW
+                [0x75, 0x08],
+            ),
+        ];
+        for (identity_hex, expected_marker) in cases {
+            let mut identity = [0u8; 10];
+            for (i, byte) in identity.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(&identity_hex[i * 2..i * 2 + 2], 16).unwrap();
+            }
+            assert_eq!(
+                marker_from_identity(&identity),
+                expected_marker,
+                "identity {identity_hex} marker mismatch"
+            );
+        }
+    }
+
+    // ---- entries_to_targets vs real hardware (2026-09-07) ----
+
+    /// Regression test for the `entries_to_targets` masking bug, anchored to an actual
+    /// real-VM boot (RouterOS 7.24.1, scsi0, `product=RouterOS-SCSI`, `serial=573214362`,
+    /// non-standard identity `00000000000000000FF4`): `/system license print` showed
+    /// `software-id: ZTBI-ENJL` -- confirming the true match rule is the full-width
+    /// `(sid_hi|0x100) XOR mix_hi == tv_hi`, not the pre-fix `& 0xFF`-masked version (which
+    /// would have missed this: `ZTBI-ENJL`'s `tv_hi` is outside `256..512`).
+    #[test]
+    fn test_entries_to_targets_matches_real_hardware_ztbi_enjl() {
+        use crate::sha256;
+
+        let serial_bytes: [u8; 20] = *b"00000000000573214362"; // 20-digit zero-padded numeric serial
+        let mut model_bytes = [0x20u8; 16];
+        model_bytes[..13].copy_from_slice(b"RouterOS-SCSI");
+        let sector_val_bytes = 0u32.to_le_bytes(); // scsi bus forces sector_val=0
+
+        let mut buf = [0u8; 40];
+        buf[..20].copy_from_slice(&serial_bytes);
+        buf[20..36].copy_from_slice(&model_bytes);
+        buf[36..].copy_from_slice(&sector_val_bytes);
+        let (sid_lo, sid_hi) = sha256::hash_40(&buf);
+
+        let identity: [u8; 10] = [0, 0, 0, 0, 0, 0, 0, 0, 0x0F, 0xF4];
+        let (mix_lo, mix_hi) = mix_from_identity(&identity);
+
+        let entries = vec![KeyEntry {
+            software_id: "ZTBI-ENJL".to_string(),
+            signature_hex: String::new(),
+        }];
+        let target = &entries_to_targets(&entries, (mix_lo, mix_hi))[0];
+
+        assert_eq!(sid_lo, target.need_lo);
+        assert_eq!((sid_hi as u32) | 0x100, target.need_hi);
+    }
+
+    // ---- required_mix / feasible_mbr_val vs production's actual match semantics ----
+
+    /// `required_mix()` must find a hit for any `mbr_val` when the target's `tv_hi` is
+    /// constructed the same way `compute_software_id` (real, hardware-confirmed) would
+    /// produce it -- i.e. via `(sid_hi|0x100) XOR mix_hi`, always landing in `256..512`.
+    #[test]
+    fn test_required_mix_finds_hits_for_reachable_targets() {
+        let sid_lo = 0xDEADBEEFu32;
+        let sid_hi = 0x7Bu8;
+
+        for mbr_val in [0u64, 1, 189, 555, 2047] {
+            let mix = mbr_val * MIX_MULTIPLIER;
+            let mix_lo = mix as u32;
+            let mix_hi = (mix >> 32) as u32;
+            let tv_lo = sid_lo ^ mix_lo;
+            let tv_hi = ((sid_hi as u32) | 0x100) ^ mix_hi;
+
+            let required = required_mix(sid_lo, sid_hi, tv_lo, tv_hi);
+            assert_eq!(
+                feasible_mbr_val(required),
+                Some(mbr_val as u16),
+                "mbr_val={} tv_hi=0x{:X} should hit",
+                mbr_val,
+                tv_hi
+            );
+        }
+    }
+
+    /// Structural consequence, not a bug (see `required_mix`'s doc comment): a target
+    /// whose `tv_hi` falls outside `256..512` can never be matched by *any* mbr_val, for
+    /// any sid. Regression test for the 2026-09-07 real-VM finding (`MGT2-L23Y`,
+    /// `tv_hi=0x44`, confirmed unreachable -- a real VM boot with `mbr_val=468` produced a
+    /// different SOFTWARE ID, `ZTBI-ENJL`, not `MGT2-L23Y`).
+    #[test]
+    fn test_required_mix_never_hits_for_unreachable_tv_hi() {
+        let sid_lo = 0xDEADBEEFu32;
+
+        for tv_hi in [0x44u32, 0x00, 0xFF, 0x200, 0x3FF] {
+            for sid_hi in [0x00u8, 0x35, 0x7B, 0xFF] {
+                for mbr_val in 0u64..2048 {
+                    let mix = mbr_val * MIX_MULTIPLIER;
+                    let mix_lo = mix as u32;
+                    let tv_lo = sid_lo ^ mix_lo;
+                    let required = required_mix(sid_lo, sid_hi, tv_lo, tv_hi);
+                    assert_eq!(
+                        feasible_mbr_val(required),
+                        None,
+                        "tv_hi=0x{:X} sid_hi=0x{:X} mbr_val={} should never hit",
+                        tv_hi,
+                        sid_hi,
+                        mbr_val
+                    );
+                }
+            }
+        }
+    }
+
+    // ---- feasible_mbr_val (multiplicative-inverse trick) ----
+
+    /// Reference implementation using plain division -- the formula already validated in
+    /// `main.rs`'s `test_mbr_val_sweep_vs_feasibility_check_agree`. `feasible_mbr_val`
+    /// must agree with this on every input; it exists purely so the tests below don't
+    /// just check `feasible_mbr_val` against itself.
+    fn feasible_mbr_val_via_division(required_mix: u64) -> Option<u16> {
+        if required_mix.is_multiple_of(MIX_MULTIPLIER) {
+            let q = required_mix / MIX_MULTIPLIER;
+            if q < 2048 {
+                return Some(q as u16);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn test_mod_inverse_is_correct() {
+        assert_eq!(MIX_MULTIPLIER.wrapping_mul(MIX_MULTIPLIER_INV), 1);
+    }
+
+    #[test]
+    fn test_feasible_mbr_val_recovers_every_real_mbr_val() {
+        for mbr_val in 0u64..2048 {
+            let mix = mbr_val * MIX_MULTIPLIER;
+            assert_eq!(feasible_mbr_val(mix), Some(mbr_val as u16));
+        }
+    }
+
+    #[test]
+    fn test_feasible_mbr_val_matches_division_on_edge_cases() {
+        for required_mix in [
+            0u64,
+            1,
+            MIX_MULTIPLIER - 1,
+            MIX_MULTIPLIER + 1,
+            2047 * MIX_MULTIPLIER,
+            2048 * MIX_MULTIPLIER, // one past the valid range -- must be rejected
+            u64::MAX,
+            0xDEAD_BEEF_u64,
+        ] {
+            assert_eq!(
+                feasible_mbr_val(required_mix),
+                feasible_mbr_val_via_division(required_mix),
+                "mismatch at required_mix=0x{:X}",
+                required_mix
+            );
+        }
+    }
+
+    #[test]
+    fn test_feasible_mbr_val_matches_division_random_sample() {
+        // Deterministic LCG (not a real PRNG, just a cheap way to cover many inputs
+        // without a rand dependency) over the realistic ~41-bit required_mix range.
+        let mut state: u64 = 0x243F_6A88_85A3_08D3;
+        for _ in 0..50_000 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let required_mix = state & 0x1FF_FFFF_FFFF;
+            assert_eq!(
+                feasible_mbr_val(required_mix),
+                feasible_mbr_val_via_division(required_mix),
+                "mismatch at required_mix=0x{:X}",
+                required_mix
+            );
+        }
+    }
+
+    #[test]
+    fn test_marker_from_identity_low_11_bits_match_mix_from_identity() {
+        // marker and mix_from_identity's mbr_val are derived from the exact same raw16
+        // value -- marker is the full 16 bits, mbr_val is its low 11 bits. They must stay
+        // consistent for any identity, not just the cases already spot-checked above.
+        for identity in [
+            [0u8; 10],
+            [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA],
+            [0x71, 0xD2, 0x33, 0x94, 0xF5, 0x56, 0xB7, 0x18, 0xAE, 0xA0],
+        ] {
+            let marker = marker_from_identity(&identity);
+            let raw16 = u16::from_le_bytes(marker);
+            let (mix_lo, mix_hi) = mix_from_identity(&identity);
+            let expected_mix = ((raw16 as u64) & 0x7FF) * 0x3FF800F;
+            assert_eq!(
+                (mix_lo, mix_hi),
+                (expected_mix as u32, (expected_mix >> 32) as u32)
+            );
+        }
+    }
+}

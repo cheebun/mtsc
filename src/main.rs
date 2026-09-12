@@ -1526,3 +1526,1097 @@ fn verify_6g() {
         std::process::exit(1);
     }
 }
+
+// ---- Tests ----
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- SizeUnit::min_magnitude ----
+
+    #[test]
+    fn test_min_magnitude_gb_is_1() {
+        assert_eq!(SizeUnit::G.min_magnitude(), 1);
+    }
+
+    #[test]
+    fn test_min_magnitude_mb_is_64() {
+        assert_eq!(SizeUnit::M.min_magnitude(), 64);
+    }
+
+    #[test]
+    fn test_min_magnitude_bytes_is_64mb_in_bytes() {
+        assert_eq!(SizeUnit::B.min_magnitude(), 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_min_magnitude_kb_is_64mb_in_kb() {
+        assert_eq!(SizeUnit::K.min_magnitude(), 64 * 1024);
+    }
+
+    // ---- sector_val_for_bus ----
+
+    #[test]
+    fn test_sector_val_for_bus_ide_matches_standard_rounding() {
+        let total_bytes = 6 * 1024 * 1024 * 1024u64; // 6G, matches the known 0x1800 test vector
+        assert_eq!(sector_val_for_bus(BusType::Ide, total_bytes), 0x1800);
+    }
+
+    #[test]
+    fn test_sector_val_for_bus_scsi_is_always_zero() {
+        // Confirmed via 7 real boot tests on a 1GiB ARM64 VM (docs §8.11-8.13) -- scsi mode
+        // forces sector_val=0 regardless of disk size.
+        for total_bytes in [
+            1024 * 1024 * 1024u64,
+            6 * 1024 * 1024 * 1024,
+            100 * 1024 * 1024 * 1024,
+        ] {
+            assert_eq!(sector_val_for_bus(BusType::Scsi, total_bytes), 0);
+        }
+    }
+
+    // ---- disk_size_bytes_and_label ----
+
+    #[test]
+    fn test_disk_size_gb() {
+        let (bytes, label) = disk_size_bytes_and_label(100, SizeUnit::G);
+        assert_eq!(bytes, 100 * 1024 * 1024 * 1024);
+        assert_eq!(label, "100G");
+    }
+
+    #[test]
+    fn test_disk_size_mb_128() {
+        let (bytes, label) = disk_size_bytes_and_label(128, SizeUnit::M);
+        assert_eq!(bytes, 128 * 1024 * 1024);
+        assert_eq!(label, "128M");
+    }
+
+    #[test]
+    fn test_disk_size_mb_256_512() {
+        assert_eq!(
+            disk_size_bytes_and_label(256, SizeUnit::M).0,
+            256 * 1024 * 1024
+        );
+        assert_eq!(
+            disk_size_bytes_and_label(512, SizeUnit::M).0,
+            512 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn test_disk_size_mb_vs_gb_distinct() {
+        let (mb_bytes, _) = disk_size_bytes_and_label(1, SizeUnit::M);
+        let (gb_bytes, _) = disk_size_bytes_and_label(1, SizeUnit::G);
+        assert_eq!(gb_bytes, mb_bytes * 1024);
+    }
+
+    #[test]
+    fn test_disk_size_bytes_unit_passthrough() {
+        // For SizeUnit::B, magnitude IS the byte count (bytes_per_unit == 1)
+        let (bytes, label) = disk_size_bytes_and_label(67_108_864, SizeUnit::B);
+        assert_eq!(bytes, 67_108_864);
+        assert_eq!(label, "67108864B");
+    }
+
+    #[test]
+    fn test_disk_size_bytes_matches_equivalent_mb() {
+        let (bytes_via_b, _) = disk_size_bytes_and_label(134_217_728, SizeUnit::B);
+        let (bytes_via_m, _) = disk_size_bytes_and_label(128, SizeUnit::M);
+        assert_eq!(bytes_via_b, bytes_via_m);
+    }
+
+    #[test]
+    fn test_disk_size_kb() {
+        let (bytes, label) = disk_size_bytes_and_label(65_536, SizeUnit::K);
+        assert_eq!(bytes, 65_536 * 1024);
+        assert_eq!(label, "65536K");
+    }
+
+    #[test]
+    fn test_disk_size_kb_matches_equivalent_mb() {
+        let (bytes_via_k, _) = disk_size_bytes_and_label(131_072, SizeUnit::K);
+        let (bytes_via_m, _) = disk_size_bytes_and_label(128, SizeUnit::M);
+        assert_eq!(bytes_via_k, bytes_via_m);
+    }
+
+    // ---- write_serial ----
+
+    #[test]
+    fn test_write_serial_zero() {
+        let mut buf = [0u8; SERIAL_LEN];
+        write_serial(&mut buf, 0);
+        assert_eq!(&buf, b"00000000000000000000");
+    }
+
+    #[test]
+    fn test_write_serial_one() {
+        let mut buf = [0u8; SERIAL_LEN];
+        write_serial(&mut buf, 1);
+        assert_eq!(&buf, b"00000000000000000001");
+    }
+
+    #[test]
+    fn test_write_serial_known_6g() {
+        let mut buf = [0u8; SERIAL_LEN];
+        write_serial(&mut buf, 401012206606);
+        assert_eq!(&buf, b"00000000401012206606");
+    }
+
+    #[test]
+    fn test_write_serial_large() {
+        let mut buf = [0u8; SERIAL_LEN];
+        write_serial(&mut buf, 6145996160994);
+        assert_eq!(&buf, b"00000006145996160994");
+    }
+
+    #[test]
+    fn test_write_serial_max_u64() {
+        let mut buf = [0u8; SERIAL_LEN];
+        write_serial(&mut buf, u64::MAX);
+        assert_eq!(&buf, b"18446744073709551615");
+    }
+
+    // ---- leading_pad_to_space_padded (b'0') -- formerly the standalone
+    // `zero_padded_to_space_padded`, removed as a distinct function during the backend
+    // refactor since it was exactly `leading_pad_to_space_padded(buf, b'0')`. ----
+
+    #[test]
+    fn test_zero_padded_to_space_padded_zero() {
+        let mut buf = [0u8; SERIAL_LEN];
+        write_serial(&mut buf, 0);
+        let out = leading_pad_to_space_padded(&buf, b'0');
+        assert_eq!(&out, b"0                   ");
+    }
+
+    #[test]
+    fn test_zero_padded_to_space_padded_short() {
+        let mut buf = [0u8; SERIAL_LEN];
+        write_serial(&mut buf, 123);
+        let out = leading_pad_to_space_padded(&buf, b'0');
+        assert_eq!(&out, b"123                 ");
+    }
+
+    #[test]
+    fn test_zero_padded_to_space_padded_matches_earlier_real_disk_case() {
+        // The exact scenario this feature was requested for: serial=25828501 on a real
+        // disk was observed to NOT be zero-padded by the controller (a short zero-padded
+        // vs. unpadded serial produced different SOFTWARE IDs when boot-tested on a real
+        // VM this session) -- confirming what the space-padded form should look like.
+        let mut buf = [0u8; SERIAL_LEN];
+        write_serial(&mut buf, 25828501);
+        let out = leading_pad_to_space_padded(&buf, b'0');
+        assert_eq!(&out, b"25828501            ");
+    }
+
+    #[test]
+    fn test_zero_padded_to_space_padded_full_length_no_zeros_stripped() {
+        // A 20-digit value with no leading zeros: nothing to strip, output == input.
+        let mut buf = [0u8; SERIAL_LEN];
+        write_serial(&mut buf, u64::MAX); // "18446744073709551615", 20 digits, leads with '1'
+        let out = leading_pad_to_space_padded(&buf, b'0');
+        assert_eq!(&out, &buf);
+    }
+
+    #[test]
+    fn test_zero_padded_to_space_padded_leading_zero_digit_preserved() {
+        // A significant digit that happens to be '0' (not a leading-zero pad byte) must
+        // survive -- only the *leading* run of zero pad bytes is stripped.
+        let buf = *b"00000000000000010203";
+        let out = leading_pad_to_space_padded(&buf, b'0');
+        assert_eq!(&out, b"10203               ");
+    }
+
+    // ---- increment_bcd ----
+
+    #[test]
+    fn test_increment_bcd_simple() {
+        let mut buf = *b"00000000000000000000";
+        increment_bcd(&mut buf);
+        assert_eq!(&buf, b"00000000000000000001");
+    }
+
+    #[test]
+    fn test_increment_bcd_carry() {
+        let mut buf = *b"00000000000000000009";
+        increment_bcd(&mut buf);
+        assert_eq!(&buf, b"00000000000000000010");
+    }
+
+    #[test]
+    fn test_increment_bcd_multi_carry() {
+        let mut buf = *b"00000000000000000099";
+        increment_bcd(&mut buf);
+        assert_eq!(&buf, b"00000000000000000100");
+    }
+
+    #[test]
+    fn test_increment_bcd_all_nines() {
+        let mut buf = *b"00000000000000009999";
+        increment_bcd(&mut buf);
+        assert_eq!(&buf, b"00000000000000010000");
+    }
+
+    #[test]
+    fn test_increment_bcd_consistency_with_write_serial() {
+        let base: u64 = 999_999_999_990;
+        let mut bcd_buf = [0u8; SERIAL_LEN];
+        write_serial(&mut bcd_buf, base);
+
+        for i in 1..=16u64 {
+            increment_bcd(&mut bcd_buf);
+            let mut expected = [0u8; SERIAL_LEN];
+            write_serial(&mut expected, base + i);
+            assert_eq!(bcd_buf, expected, "BCD mismatch at base+{}", i);
+        }
+    }
+
+    // ---- write_candidate / increment_candidate (arbitrary-alphabet `--alphabet`) ----
+
+    #[test]
+    fn test_write_candidate_matches_write_serial_on_default_alphabet() {
+        // write_candidate/increment_candidate must be exact drop-in replacements for
+        // write_serial/increment_bcd when given the default digit alphabet -- this is what
+        // makes the default `--alphabet "0123456789"` path behaviorally identical to the
+        // tool's original (pre-`--alphabet`) behavior.
+        let digits = b"0123456789";
+        for n in [0u128, 1, 9, 10, 99, 100, 999_999_999_990] {
+            let mut a = [0u8; SERIAL_LEN];
+            write_candidate(&mut a, n, digits);
+            let mut b = [0u8; SERIAL_LEN];
+            write_serial(&mut b, n as u64);
+            assert_eq!(a, b, "mismatch at n={}", n);
+        }
+    }
+
+    #[test]
+    fn test_write_candidate_base36() {
+        let alphabet = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let mut buf = [0u8; SERIAL_LEN];
+        write_candidate(&mut buf, 0, alphabet);
+        assert_eq!(&buf, b"00000000000000000000");
+
+        write_candidate(&mut buf, 35, alphabet);
+        assert_eq!(&buf, b"0000000000000000000Z"); // 35 -> last symbol
+
+        write_candidate(&mut buf, 36, alphabet);
+        assert_eq!(&buf, b"00000000000000000010"); // 36 -> carries to the next position
+    }
+
+    #[test]
+    fn test_increment_candidate_base36_carry() {
+        let alphabet = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let mut buf = *b"0000000000000000000Z";
+        increment_candidate(&mut buf, alphabet);
+        assert_eq!(&buf, b"00000000000000000010");
+    }
+
+    #[test]
+    fn test_increment_candidate_consistency_with_write_candidate() {
+        let alphabet = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let base: u128 = 46655; // 35*36^2 + 35*36 + 35 = "0..0ZZZ"
+        let mut buf = [0u8; SERIAL_LEN];
+        write_candidate(&mut buf, base, alphabet);
+
+        for i in 1..=40u128 {
+            increment_candidate(&mut buf, alphabet);
+            let mut expected = [0u8; SERIAL_LEN];
+            write_candidate(&mut expected, base + i, alphabet);
+            assert_eq!(buf, expected, "base-36 mismatch at base+{}", i);
+        }
+    }
+
+    #[test]
+    fn test_leading_pad_to_space_padded_generalizes_zero_padded() {
+        let alphabet = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        // `write_candidate` interprets `n` in base-36, so plain decimal 123 would spell
+        // "3F", not "123" -- pick the base-36 value whose last 3 symbols are literally
+        // '1','2','3': 1*36^2 + 2*36 + 3 = 1371.
+        let mut buf = [0u8; SERIAL_LEN];
+        write_candidate(&mut buf, 1371, alphabet); // "00000000000000000123"
+        let out = leading_pad_to_space_padded(&buf, alphabet[0]);
+        assert_eq!(&out[..3], b"123");
+        assert_eq!(&out[3..], &[SPACE_PADDING; 17]);
+        // Must match the b'0'-specialized case exactly for this all-digit input.
+        assert_eq!(out, leading_pad_to_space_padded(&buf, b'0'));
+    }
+
+    // ---- validate_alphabet ----
+
+    #[test]
+    fn test_validate_alphabet_default_ok() {
+        assert_eq!(validate_alphabet("0123456789"), b"0123456789".to_vec());
+    }
+
+    #[test]
+    fn test_validate_alphabet_base36_ok() {
+        let alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        assert_eq!(validate_alphabet(alphabet), alphabet.as_bytes().to_vec());
+    }
+
+    // ---- candidate_space_limit / resolve_start_serial / resolve_model ----
+    //
+    // New in the backend refactor (no pre-refactor equivalent to port): the old scalar/SIMD
+    // loops wrapped a u64 counter unconditionally; the batch-generic search now stops at an
+    // exact candidate-space boundary for small alphabets instead of wrapping mid-space.
+
+    #[test]
+    fn test_candidate_space_limit_default_alphabet_overflows_u64() {
+        // 10^20 doesn't fit in u64 (u64::MAX ~= 1.8e19), so the default digit alphabet's
+        // space limit must be None (checked_pow overflow), preserving the original
+        // wrap-to-zero-after-u64::MAX behavior for the default 20-digit decimal counter.
+        assert_eq!(candidate_space_limit(10), None);
+    }
+
+    #[test]
+    fn test_candidate_space_limit_small_alphabet_fits() {
+        // 2^20 = 1_048_576, comfortably fits in u64.
+        assert_eq!(candidate_space_limit(2), Some(1u64 << 20));
+    }
+
+    #[test]
+    fn test_resolve_start_serial_within_limit() {
+        assert_eq!(resolve_start_serial(5, Some(10_000_000)), Ok(5_000_000));
+    }
+
+    #[test]
+    fn test_resolve_start_serial_exhausted_errs() {
+        assert!(resolve_start_serial(5, Some(1_000_000)).is_err());
+    }
+
+    #[test]
+    fn test_resolve_start_serial_no_limit_never_errs_on_reasonable_input() {
+        assert_eq!(resolve_start_serial(5, None), Ok(5_000_000));
+    }
+
+    #[test]
+    fn test_resolve_model_uses_disk_size_label_when_omitted() {
+        assert_eq!(
+            resolve_model(None, Some(6), "6G").unwrap(),
+            "ROS6G".to_string()
+        );
+    }
+
+    #[test]
+    fn test_resolve_model_explicit_overrides_default() {
+        assert_eq!(
+            resolve_model(Some("Custom".to_string()), Some(6), "6G").unwrap(),
+            "Custom".to_string()
+        );
+    }
+
+    #[test]
+    fn test_resolve_model_errors_without_disk_size_or_explicit_model() {
+        assert!(resolve_model(None, None, "").is_err());
+    }
+
+    // ---- mbr_val search strategy cross-validation (Approach A vs Approach B) ----
+    //
+    // Two independent ways to find, for a fixed serial/model/size, which `mbr_val`
+    // (0..2048) reproduces a target SOFTWARE ID when `--identity` isn't fixed:
+    //
+    //   Approach A ("sweep"): for each candidate, try all 2048 `mbr_val` values and
+    //   compare the resulting (final_lo, final_hi) against the target's raw values.
+    //   O(2048) per candidate.
+    //
+    //   Approach B ("feasibility check", per docs/reference/identity-reverse-search.md):
+    //   for each candidate, XOR its sid_lo/sid_hi against the target directly to get the
+    //   *required* mix, then check it's an exact multiple of 0x3FF800F with a quotient in
+    //   0..=2047. O(1) per candidate (per target) -- no sweep needed.
+    //
+    // Both must find exactly the same hits. This test builds a small synthetic search
+    // space with a known "needle" (a specific candidate/mbr_val pair guaranteed to hit),
+    // runs both approaches over it, and asserts their hit sets agree exactly -- the same
+    // cross-validation-by-independent-implementation pattern this project already uses
+    // for SIMD vs. scalar SHA-256 (`test_simd_matches_scalar`).
+    #[test]
+    fn test_mbr_val_sweep_vs_feasibility_check_agree() {
+        const N_CANDIDATES: usize = 2000;
+        const NEEDLE_IDX: usize = 777;
+        const NEEDLE_MBR_VAL: u32 = 555;
+        const MIX_MULTIPLIER: u64 = 0x3FF800F;
+
+        // Fixed model/disk-size context, same shape as a real `search` run.
+        let model_bytes = build_model_bytes("ROS1G");
+        let sector_val = disk_bytes_to_sector_val(1_073_741_824); // 1G
+        let sv_bytes = sector_val.to_le_bytes();
+
+        // Generate N_CANDIDATES consecutive serials (BCD increment, same as the real
+        // search loop) and their (sid_lo, sid_hi) hashes.
+        let mut serial_buf = [b'0'; SERIAL_LEN];
+        let mut candidates: Vec<(u32, u8)> = Vec::with_capacity(N_CANDIDATES);
+        for _ in 0..N_CANDIDATES {
+            let buf = build_input_buf(&serial_buf, &model_bytes, &sv_bytes);
+            candidates.push(sha256::hash_40(&buf));
+            increment_bcd(&mut serial_buf);
+        }
+
+        // Plant the needle: the target is whatever SOFTWARE ID candidate NEEDLE_IDX
+        // produces under NEEDLE_MBR_VAL. Computed directly (not via encode/decode --
+        // those have their own tests) as the raw (target_lo, target_hi) pair, matching
+        // `compute_software_id`'s real, hardware-confirmed formula (full width,
+        // `(sid_hi|0x100) XOR mix_hi` -- see targets::required_mix's doc comment,
+        // 2026-09-07 real-VM confirmation).
+        let (needle_sid_lo, needle_sid_hi) = candidates[NEEDLE_IDX];
+        let needle_mix = (NEEDLE_MBR_VAL as u64) * MIX_MULTIPLIER;
+        let needle_mix_lo = needle_mix as u32;
+        let needle_mix_hi = (needle_mix >> 32) as u32;
+        let target_lo = needle_sid_lo ^ needle_mix_lo;
+        let target_hi = ((needle_sid_hi as u32) | 0x100) ^ needle_mix_hi;
+
+        // Approach A: sweep all 2048 mbr_val per candidate.
+        let mut hits_a: Vec<(usize, u32)> = Vec::new();
+        for (i, &(sid_lo, sid_hi)) in candidates.iter().enumerate() {
+            for mbr_val in 0u32..2048 {
+                let mix = (mbr_val as u64) * MIX_MULTIPLIER;
+                let mix_lo = mix as u32;
+                let mix_hi = (mix >> 32) as u32;
+                let final_lo = sid_lo ^ mix_lo;
+                let final_hi = ((sid_hi as u32) | 0x100) ^ mix_hi;
+                if final_lo == target_lo && final_hi == target_hi {
+                    hits_a.push((i, mbr_val));
+                }
+            }
+        }
+
+        // Approach B: feasibility check per candidate, no sweep.
+        let mut hits_b: Vec<(usize, u32)> = Vec::new();
+        for (i, &(sid_lo, sid_hi)) in candidates.iter().enumerate() {
+            let required_mix_lo = sid_lo ^ target_lo;
+            let required_mix_hi = ((sid_hi as u32) | 0x100) ^ target_hi;
+            let required_mix = (required_mix_lo as u64) | ((required_mix_hi as u64) << 32);
+            if required_mix.is_multiple_of(MIX_MULTIPLIER) {
+                let mbr_val = required_mix / MIX_MULTIPLIER;
+                if mbr_val < 2048 {
+                    hits_b.push((i, mbr_val as u32));
+                }
+            }
+        }
+
+        assert!(
+            hits_a.contains(&(NEEDLE_IDX, NEEDLE_MBR_VAL)),
+            "planted needle must be found by approach A"
+        );
+        assert!(
+            hits_b.contains(&(NEEDLE_IDX, NEEDLE_MBR_VAL)),
+            "planted needle must be found by approach B"
+        );
+        assert_eq!(
+            hits_a, hits_b,
+            "sweep (A) and feasibility-check (B) must find exactly the same hits"
+        );
+    }
+
+    /// Real-disk, all-`keys.toml`-targets version of the A-vs-B cross-check above: for a
+    /// specific real serial/model/size, sweep all 2048 `mbr_val` (Approach A) against
+    /// *every* entry in `keys.toml` and separately run the feasibility check (Approach B)
+    /// against every entry, then assert the two full hit sets agree exactly -- not just a
+    /// single planted needle this time, the complete result for this disk.
+    ///
+    /// `#[ignore]`: depends on `keys.toml` existing at the crate root at test-run time
+    /// (gitignored, not present in a fresh clone/CI) -- run explicitly with
+    /// `cargo test -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn test_real_disk_all_targets_sweep_vs_feasibility_check_agree() {
+        const MIX_MULTIPLIER: u64 = 0x3FF800F;
+
+        let serial = "1";
+        let model = "VMware Virtual SATA Hard Drive";
+        let sizes: [(&str, u64); 18] = [
+            ("60M", 62_914_560),
+            ("128M", 128 * 1024 * 1024),
+            ("256M", 256 * 1024 * 1024),
+            ("512M", 512 * 1024 * 1024),
+            ("1G", 1024 * 1024 * 1024),
+            ("2G", 2 * 1024 * 1024 * 1024),
+            ("4G", 4 * 1024 * 1024 * 1024),
+            ("6G", 6 * 1024 * 1024 * 1024),
+            ("8G", 8 * 1024 * 1024 * 1024),
+            ("10G", 10 * 1024 * 1024 * 1024),
+            ("12G", 12 * 1024 * 1024 * 1024),
+            ("16G", 16 * 1024 * 1024 * 1024),
+            ("18G", 18 * 1024 * 1024 * 1024),
+            ("20G", 20 * 1024 * 1024 * 1024),
+            ("24G", 24 * 1024 * 1024 * 1024),
+            ("32G", 32 * 1024 * 1024 * 1024),
+            ("48G", 48 * 1024 * 1024 * 1024),
+            ("64G", 64 * 1024 * 1024 * 1024),
+        ];
+
+        let entries = targets::load_from_file("keys.toml").expect("keys.toml must be present");
+        assert!(!entries.is_empty(), "keys.toml must not be empty");
+
+        // Raw (unmasked) (name, tv_lo, tv_hi) per target -- NOT run through
+        // `entries_to_targets`, which bakes in one fixed mix and masks tv_hi to u8.
+        let raw_targets: Vec<(String, u32, u32)> = entries
+            .iter()
+            .map(|e| {
+                let tv = software_id::decode(&e.software_id)
+                    .unwrap_or_else(|err| panic!("invalid SOFTWARE ID {}: {}", e.software_id, err));
+                (e.software_id.clone(), tv as u32, (tv >> 32) as u32)
+            })
+            .collect();
+
+        for (size_label, total_bytes) in sizes {
+            for (bus, bus_label) in [(BusType::Ide, "Ide"), (BusType::Scsi, "Scsi")] {
+                let sector_val = sector_val_for_bus(bus, total_bytes);
+                let serial_bytes = build_serial_bytes_zero_pad(serial);
+                let model_bytes = build_model_bytes(model);
+                let buf = build_input_buf(&serial_bytes, &model_bytes, &sector_val.to_le_bytes());
+                let (sid_lo, sid_hi) = sha256::hash_40(&buf);
+
+                // Approach A: sweep all 2048 mbr_val, check against every target. Matches
+                // `compute_software_id`'s real, hardware-confirmed full-width formula
+                // (`(sid_hi|0x100) XOR mix_hi`, see targets::required_mix's doc comment,
+                // 2026-09-07).
+                let mut hits_a: Vec<(String, u32)> = Vec::new();
+                for mbr_val in 0u32..2048 {
+                    let mix = (mbr_val as u64) * MIX_MULTIPLIER;
+                    let mix_lo = mix as u32;
+                    let mix_hi = (mix >> 32) as u32;
+                    let final_lo = sid_lo ^ mix_lo;
+                    let final_hi = ((sid_hi as u32) | 0x100) ^ mix_hi;
+                    for (name, tv_lo, tv_hi) in &raw_targets {
+                        if final_lo == *tv_lo && final_hi == *tv_hi {
+                            hits_a.push((name.clone(), mbr_val));
+                        }
+                    }
+                }
+
+                // Approach B: feasibility check per target, no sweep.
+                let mut hits_b: Vec<(String, u32)> = Vec::new();
+                for (name, tv_lo, tv_hi) in &raw_targets {
+                    let required_mix_lo = sid_lo ^ tv_lo;
+                    let required_mix_hi = ((sid_hi as u32) | 0x100) ^ tv_hi;
+                    let required_mix = (required_mix_lo as u64) | ((required_mix_hi as u64) << 32);
+                    if required_mix.is_multiple_of(MIX_MULTIPLIER) {
+                        let mbr_val = required_mix / MIX_MULTIPLIER;
+                        if mbr_val < 2048 {
+                            hits_b.push((name.clone(), mbr_val as u32));
+                        }
+                    }
+                }
+                hits_a.sort();
+                hits_b.sort();
+
+                eprintln!(
+                    "[{size_label} bytes={total_bytes} {bus_label}] sid_lo=0x{sid_lo:08X} sid_hi=0x{sid_hi:02X} -- {} keys.toml targets checked",
+                    raw_targets.len()
+                );
+                eprintln!("[{size_label} {bus_label}] Approach A hits: {hits_a:?}");
+                eprintln!("[{size_label} {bus_label}] Approach B hits: {hits_b:?}");
+
+                assert_eq!(
+                    hits_a, hits_b,
+                    "[{size_label} {bus_label}] sweep (A) and feasibility-check (B) must find exactly the same hits for every keys.toml target"
+                );
+            }
+        }
+    }
+
+    // ---- compute_software_id ----
+
+    #[test]
+    fn test_compute_software_id_6g_vmware() {
+        let (mix_lo, mix_hi) = targets::mbr_mix();
+        let sid = compute_software_id(0x0B49EC2E, 0x35, mix_lo, mix_hi);
+        // Self-consistency: result must be a valid SOFTWARE ID that round-trips
+        assert_eq!(sid.len(), 9);
+        assert_eq!(sid.chars().nth(4), Some('-'));
+        let v = software_id::decode(&sid).expect("decode computed sid");
+        assert_eq!(software_id::encode(v), sid);
+    }
+
+    #[test]
+    fn test_compute_software_id_deterministic() {
+        let (mix_lo, mix_hi) = targets::mbr_mix();
+        let a = compute_software_id(0xAABBCCDD, 0xEE, mix_lo, mix_hi);
+        let b = compute_software_id(0xAABBCCDD, 0xEE, mix_lo, mix_hi);
+        assert_eq!(a, b, "same input must produce same output");
+    }
+
+    // ---- build_model_bytes ----
+
+    #[test]
+    fn test_build_model_bytes_short() {
+        let bytes = build_model_bytes("ROS6G");
+        assert_eq!(&bytes[..5], b"ROS6G");
+        assert_eq!(bytes[5], SPACE_PADDING);
+        assert_eq!(bytes[15], SPACE_PADDING);
+    }
+
+    #[test]
+    fn test_build_model_bytes_exact() {
+        let bytes = build_model_bytes("VMware Virtual I");
+        assert_eq!(&bytes, b"VMware Virtual I");
+    }
+
+    // ---- build_serial_bytes_zero_pad / build_serial_bytes_space_pad ----
+    //
+    // `cmd_check` computes BOTH conventions for any serial where they'd actually differ
+    // (pure digits shorter than SERIAL_LEN) rather than guessing one -- see §8.62.
+
+    #[test]
+    fn test_build_serial_bytes_zero_pad_numeric_short() {
+        let bytes = build_serial_bytes_zero_pad("123");
+        assert_eq!(&bytes, b"00000000000000000123");
+    }
+
+    #[test]
+    fn test_build_serial_bytes_space_pad_numeric_short() {
+        // Confirmed against real hardware, not just disassembly -- see §8.62.
+        let bytes = build_serial_bytes_space_pad("123");
+        assert_eq!(&bytes[..3], b"123");
+        assert_eq!(&bytes[3..], &[SPACE_PADDING; 17]);
+    }
+
+    #[test]
+    fn test_build_serial_bytes_zero_and_space_pad_agree_at_full_length() {
+        // Already exactly SERIAL_LEN bytes: no padding applies, so both conventions
+        // produce the identical literal pass-through.
+        let zero = build_serial_bytes_zero_pad("00000000350481748276");
+        let space = build_serial_bytes_space_pad("00000000350481748276");
+        assert_eq!(&zero, b"00000000350481748276");
+        assert_eq!(zero, space);
+    }
+
+    #[test]
+    fn test_build_serial_bytes_alpha_exact() {
+        // 19-char alphanumeric serial: right-padded with one trailing space to fill
+        // SERIAL_LEN (20). Alphanumeric input has no meaningful "zero-pad" form, so
+        // zero_pad falls back to the same space-pad result as space_pad directly.
+        let zero = build_serial_bytes_zero_pad("G4HQT594JN8VLY0FGN9");
+        let space = build_serial_bytes_space_pad("G4HQT594JN8VLY0FGN9");
+        assert_eq!(&space, b"G4HQT594JN8VLY0FGN9 ");
+        assert_eq!(zero, space);
+    }
+
+    #[test]
+    fn test_build_serial_bytes_alpha_short() {
+        let bytes = build_serial_bytes_space_pad("SZHYPO14090903D0164");
+        // 19 chars + 1 space padding on right
+        assert_eq!(&bytes[..19], b"SZHYPO14090903D0164");
+        assert_eq!(bytes[19], SPACE_PADDING);
+    }
+
+    #[test]
+    fn test_build_serial_bytes_with_hyphen() {
+        let bytes = build_serial_bytes_space_pad("HYSSD-20160419B7902");
+        assert_eq!(&bytes[..19], b"HYSSD-20160419B7902");
+        assert_eq!(bytes[19], SPACE_PADDING);
+    }
+
+    #[test]
+    fn test_build_serial_bytes_empty_matches_keyman_space_padding() {
+        // keyman zero-fills its 20-byte serial buffer before reading the disk, then
+        // sweeps the whole buffer turning every zero byte into a space -- an empty
+        // (zero-length) serial therefore becomes 20 ASCII spaces, not 20 '0' chars.
+        // Confirmed via keyman_x86_7.24.1 disassembly (zero-fill at 0x8050411-0x805041e,
+        // pad loop at 0x8050a1e-0x8050a29, which never special-cases length 0). Both
+        // functions must agree here: zero_pad's `is_numeric` check treats empty as
+        // non-numeric and falls back to space_pad, matching keyman's real behavior.
+        let zero = build_serial_bytes_zero_pad("");
+        let space = build_serial_bytes_space_pad("");
+        assert_eq!(&zero, &[SPACE_PADDING; SERIAL_LEN]);
+        assert_eq!(zero, space);
+    }
+
+    // ---- parse_identity_hex / resolve_mix ----
+
+    #[test]
+    fn test_parse_identity_hex_exact_20() {
+        let bytes = parse_identity_hex("0011223344556677AABB");
+        assert_eq!(
+            bytes,
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0xAA, 0xBB]
+        );
+    }
+
+    #[test]
+    fn test_parse_identity_hex_lowercase() {
+        let bytes = parse_identity_hex("0011223344556677aabb");
+        assert_eq!(
+            bytes,
+            [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0xAA, 0xBB]
+        );
+    }
+
+    #[test]
+    fn test_resolve_mix_none_matches_standard() {
+        assert_eq!(resolve_mix(None), targets::mbr_mix());
+    }
+
+    #[test]
+    fn test_resolve_mix_custom_matches_targets_fn() {
+        let hex = "0011223344556677AABB";
+        assert_eq!(
+            resolve_mix(Some(hex)),
+            targets::mix_from_identity(&parse_identity_hex(hex))
+        );
+    }
+
+    // ---- is_valid_serial / is_valid_model ----
+
+    #[test]
+    fn test_is_valid_serial() {
+        assert!(is_valid_serial("00000000350481748276"));
+        assert!(is_valid_serial("G4HQT594JN8VLY0FGN9"));
+        assert!(is_valid_serial("HYSSD-20160419B79028"));
+        assert!(!is_valid_serial("hello world")); // space invalid
+        assert!(!is_valid_serial("test@#$"));
+    }
+
+    #[test]
+    fn test_is_valid_model() {
+        assert!(is_valid_model("VMware Virtual I"));
+        assert!(is_valid_model("ROS128G"));
+        assert!(is_valid_model("cheerlon"));
+        assert!(!is_valid_model("test@model"));
+    }
+
+    // ---- build_input_buf ----
+
+    #[test]
+    fn test_build_input_buf_layout() {
+        let serial = *b"00000000000000000001";
+        let model = *b"VMware Virtual I";
+        let sv = 0x1800u32.to_le_bytes();
+        let buf = build_input_buf(&serial, &model, &sv);
+
+        assert_eq!(buf.len(), INPUT_LEN);
+        assert_eq!(&buf[..SERIAL_LEN], b"00000000000000000001");
+        assert_eq!(
+            &buf[SERIAL_LEN..SERIAL_LEN + MODEL_LEN],
+            b"VMware Virtual I"
+        );
+        assert_eq!(&buf[SERIAL_LEN + MODEL_LEN..], &sv);
+    }
+
+    // ---- check_match ----
+
+    fn make_test_ctx(targets: Vec<targets::Target>) -> SearchContext {
+        let (mix_lo, mix_hi) = targets::mbr_mix();
+        SearchContext {
+            model_bytes: [SPACE_PADDING; MODEL_LEN],
+            sv_bytes: [0; 4],
+            targets: Arc::new(targets),
+            raw_targets: None,
+            mbr_table: None,
+            pad: PadPosition::Start,
+            alphabet: b"0123456789".to_vec(),
+            is_default_alphabet: true,
+            mix_lo,
+            mix_hi,
+            max_collisions: 0,
+            stop: Arc::new(AtomicBool::new(false)),
+            found_count: Arc::new(AtomicUsize::new(0)),
+            start: Instant::now(),
+        }
+    }
+
+    /// Hash the serial `check_match`'s `verify_search_hit` would independently reconstruct
+    /// for `make_test_ctx`'s default context (default alphabet, `PadPosition::Start`,
+    /// space-padded all-blank model, zero sector value).
+    fn hash_for_ctx_serial(serial_num: u64) -> (u32, u8) {
+        let mut serial = [0u8; SERIAL_LEN];
+        write_serial(&mut serial, serial_num);
+        let buf = build_input_buf(&serial, &[SPACE_PADDING; MODEL_LEN], &[0u8; 4]);
+        sha256::hash_40(&buf)
+    }
+
+    /// A target genuinely consistent with `(sid_lo, sid_hi)` under `make_test_ctx`'s mix
+    /// (`targets::mbr_mix()`). `check_match` now independently re-hashes and re-derives the
+    /// full SOFTWARE ID via `verify_search_hit` before accepting a hit (a safety net added
+    /// post-refactor -- not present in the pre-refactor version this test was ported from),
+    /// so unlike the old arbitrary `"TEST-0001"` placeholder, `name` must be the real
+    /// `compute_software_id` result or `verify_search_hit` rejects the hit as unverifiable.
+    fn make_fake_target(sid_lo: u32, sid_hi: u8) -> targets::Target {
+        let (mix_lo, mix_hi) = targets::mbr_mix();
+        targets::Target {
+            need_lo: sid_lo,
+            need_hi: (sid_hi as u32) | 0x100,
+            name: compute_software_id(sid_lo, sid_hi, mix_lo, mix_hi),
+            signature_hex: "AA".repeat(64),
+        }
+    }
+
+    #[test]
+    fn test_check_match_hit() {
+        let (sid_lo, sid_hi) = hash_for_ctx_serial(1);
+        let ctx = make_test_ctx(vec![make_fake_target(sid_lo, sid_hi)]);
+
+        check_match(1, sid_lo, sid_hi, &ctx);
+        assert_eq!(ctx.found_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_check_match_miss() {
+        let (sid_lo, sid_hi) = hash_for_ctx_serial(1);
+        let ctx = make_test_ctx(vec![make_fake_target(sid_lo, sid_hi)]);
+
+        check_match(999, 0xDEADBEEF, 0xFF, &ctx);
+        assert_eq!(ctx.found_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_check_match_sid_hi_only_miss() {
+        let (sid_lo, sid_hi) = hash_for_ctx_serial(1);
+        let ctx = make_test_ctx(vec![make_fake_target(sid_lo, sid_hi)]);
+
+        check_match(999, sid_lo, 0x99, &ctx);
+        assert_eq!(ctx.found_count.load(Ordering::Relaxed), 0);
+    }
+
+    /// The always-present first entry of `HashEngine::supported()` is guaranteed to be the
+    /// portable `Scalar` backend (see its doc comment/construction) -- used here to drive
+    /// `search_batch` deterministically without depending on `HashEngine::auto()`'s
+    /// timing-based calibration (which spawns threads and is unsuitable for a unit test).
+    fn scalar_engine() -> HashEngine {
+        HashEngine::supported()[0]
+    }
+
+    /// Ported from the pre-refactor `test_search_scalar_finds_space_padded_target`:
+    /// `search_scalar`/`search_simd` were merged into a single batch-generic `search_batch`
+    /// that takes an explicit `HashEngine`, so this now drives it with the scalar engine.
+    #[test]
+    fn test_search_batch_finds_space_padded_target() {
+        let model_bytes = [SPACE_PADDING; MODEL_LEN];
+        let sv_bytes = [0u8; 4];
+
+        // Plant a target at serial=7 using SPACE padding ("7" + 19 spaces), not the
+        // default zero padding.
+        let mut zero_buf = [b'0'; SERIAL_LEN];
+        write_serial(&mut zero_buf, 7);
+        let space_buf = leading_pad_to_space_padded(&zero_buf, b'0');
+        let buf = build_input_buf(&space_buf, &model_bytes, &sv_bytes);
+        let (sid_lo, sid_hi) = sha256::hash_40(&buf);
+
+        let need_lo = sid_lo;
+        let need_hi = (sid_hi as u32) | 0x100;
+        // `check_match`'s `verify_search_hit` independently recomputes the full SOFTWARE ID
+        // and rejects the hit unless `name` is exactly that -- an arbitrary label like the
+        // old "SPACE-TEST" placeholder would make this test fail post-refactor.
+        let (mix_lo, mix_hi) = targets::mbr_mix();
+        let make_target = || targets::Target {
+            need_lo,
+            need_hi,
+            name: compute_software_id(sid_lo, sid_hi, mix_lo, mix_hi),
+            signature_hex: "00".repeat(64),
+        };
+
+        // With --pad end, search_batch must find it at serial index 7.
+        let mut ctx = make_test_ctx(vec![make_target()]);
+        ctx.pad = PadPosition::End;
+        ctx.max_collisions = 1;
+        ctx.model_bytes = model_bytes;
+        ctx.sv_bytes = sv_bytes;
+        search_batch(0, 1, 0, &ctx, scalar_engine());
+        assert_eq!(ctx.found_count.load(Ordering::Relaxed), 1);
+        assert!(ctx.stop.load(Ordering::Relaxed));
+
+        // The same target's hash must NOT be produced by the start-padded serial=7
+        // ("00000000000000000007") -- confirms the two padding modes genuinely diverge.
+        let zero_input_buf = build_input_buf(&zero_buf, &model_bytes, &sv_bytes);
+        let (zero_sid_lo, zero_sid_hi) = sha256::hash_40(&zero_input_buf);
+        assert!(zero_sid_lo != need_lo || ((zero_sid_hi as u32) | 0x100) != need_hi);
+    }
+
+    /// Ported from `test_search_scalar_finds_target_with_custom_alphabet` /
+    /// `test_search_simd_finds_target_with_custom_alphabet`: those two engine-specific tests
+    /// merged into one loop over every backend `HashEngine::supported()` returns on this
+    /// host, since `search_scalar`/`search_simd` are now the single generic `search_batch`.
+    /// This actually broadens coverage vs. the original (which only ever exercised scalar
+    /// and, conditionally, AVX-512): whichever of scalar/sha-ni/avx2/avx512/arm-sha2/neon
+    /// the running CPU supports all get exercised here.
+    #[test]
+    fn test_search_batch_finds_target_with_custom_alphabet_all_engines() {
+        let alphabet = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_vec();
+        let model_bytes = [SPACE_PADDING; MODEL_LEN];
+        let sv_bytes = [0u8; 4];
+
+        // Candidate index 46, in base-36, is 1*36 + 10 -> the last two symbols are
+        // alphabet[1]='1' and alphabet[10]='A', i.e. "...001A" -- genuinely requires a
+        // letter and is unambiguously different from write_serial(46)'s base-10 "...0046".
+        let idx: u128 = 46;
+        let mut target_buf = [0u8; SERIAL_LEN];
+        write_candidate(&mut target_buf, idx, &alphabet);
+        assert!(
+            target_buf.contains(&b'A') || !target_buf.iter().all(|b| b.is_ascii_digit()),
+            "sanity: base-36 index {} should not be pure-decimal-equivalent to base-10 {}",
+            idx,
+            idx
+        );
+
+        let buf = build_input_buf(&target_buf, &model_bytes, &sv_bytes);
+        let (sid_lo, sid_hi) = sha256::hash_40(&buf);
+        let need_lo = sid_lo;
+        let need_hi = (sid_hi as u32) | 0x100;
+        // Same `verify_search_hit`-consistency requirement as above: `name` must be the
+        // real computed SOFTWARE ID, not an arbitrary label.
+        let (mix_lo, mix_hi) = targets::mbr_mix();
+        let make_target = || targets::Target {
+            need_lo,
+            need_hi,
+            name: compute_software_id(sid_lo, sid_hi, mix_lo, mix_hi),
+            signature_hex: "00".repeat(64),
+        };
+
+        for engine in HashEngine::supported() {
+            let mut ctx = make_test_ctx(vec![make_target()]);
+            ctx.alphabet = alphabet.clone();
+            ctx.is_default_alphabet = false;
+            ctx.pad = PadPosition::Start;
+            ctx.max_collisions = 1;
+            ctx.model_bytes = model_bytes;
+            ctx.sv_bytes = sv_bytes;
+            search_batch(0, 1, idx as u64, &ctx, engine);
+            assert_eq!(
+                ctx.found_count.load(Ordering::Relaxed),
+                1,
+                "engine {} failed to find the planted hit",
+                engine
+            );
+            assert!(ctx.stop.load(Ordering::Relaxed));
+        }
+
+        // Confirm the default (base-10) path does NOT produce this same hash at the same
+        // loop index -- proving the two candidate-generation paths genuinely diverge.
+        let mut default_buf = [b'0'; SERIAL_LEN];
+        write_serial(&mut default_buf, idx as u64);
+        let default_input_buf = build_input_buf(&default_buf, &model_bytes, &sv_bytes);
+        let (default_sid_lo, default_sid_hi) = sha256::hash_40(&default_input_buf);
+        assert!(default_sid_lo != need_lo || ((default_sid_hi as u32) | 0x100) != need_hi);
+    }
+
+    #[test]
+    fn test_check_match_stops_at_target_count() {
+        let (sid_lo, sid_hi) = hash_for_ctx_serial(0);
+        let mut ctx = make_test_ctx(vec![make_fake_target(sid_lo, sid_hi)]);
+        ctx.max_collisions = 1;
+
+        check_match(0, sid_lo, sid_hi, &ctx);
+        assert!(ctx.stop.load(Ordering::Relaxed));
+    }
+
+    // ---- End-to-end SOFTWARE ID ----
+
+    #[test]
+    fn test_end_to_end_6g_vmware() {
+        let serial = *b"00000000000000000001";
+        let model = *b"VMware Virtual I";
+        let buf = build_input_buf(&serial, &model, &0x1800u32.to_le_bytes());
+
+        let (sid_lo, sid_hi) = sha256::hash_40(&buf);
+        let (mix_lo, mix_hi) = targets::mbr_mix();
+        let sid = compute_software_id(sid_lo, sid_hi, mix_lo, mix_hi);
+        // Self-consistency: computed SOFTWARE ID must encode/decode round-trip
+        let v = software_id::decode(&sid).expect("decode computed sid");
+        assert_eq!(software_id::encode(v), sid);
+    }
+
+    #[test]
+    fn test_end_to_end_16g() {
+        let serial = *b"00000000202155543391";
+        let model_bytes = build_model_bytes("ROS16G");
+        let buf = build_input_buf(&serial, &model_bytes, &0x4000u32.to_le_bytes());
+
+        let (sid_lo, sid_hi) = sha256::hash_40(&buf);
+        let (mix_lo, mix_hi) = targets::mbr_mix();
+        let sid = compute_software_id(sid_lo, sid_hi, mix_lo, mix_hi);
+        let v = software_id::decode(&sid).expect("decode computed sid");
+        assert_eq!(software_id::encode(v), sid);
+    }
+
+    // ---- precompute_constant_words ----
+
+    #[test]
+    fn test_precompute_constant_words() {
+        let model = b"VMware Virtual I";
+        let sv_bytes = 0x1800u32.to_le_bytes();
+        let words = mtsc::sha256_backend::precompute_constant_words(model, &sv_bytes);
+
+        assert_eq!(words[0], u32::from_be_bytes(*b"VMwa"));
+        assert_eq!(words[1], u32::from_be_bytes(*b"re V"));
+        assert_eq!(words[2], u32::from_be_bytes(*b"irtu"));
+        assert_eq!(words[3], u32::from_be_bytes(*b"al I"));
+        assert_eq!(words[4], u32::from_be_bytes([0x00, 0x18, 0x00, 0x00]));
+    }
+
+    // ---- HashEngine backend cross-validation (new in the multi-ISA backend refactor) ----
+    //
+    // No pre-refactor equivalent to port: scalar/AVX-512 were the only two backends and
+    // already had dedicated tests above and in `sha256_simd.rs`. SHA-NI/AVX2/ARM-SHA2/NEON
+    // are new in this PR and never had test coverage. `HashEngine::self_check()` already
+    // cross-validates whatever backends the *current* CPU supports against the scalar
+    // reference at runtime (called from `auto_for_threads` before real work starts) -- these
+    // tests just make that mechanism also run under `cargo test`/CI, so a broken new backend
+    // fails the build instead of only being caught the first time it runs in production.
+
+    #[test]
+    fn test_hash_engine_supported_always_includes_scalar() {
+        let engines = HashEngine::supported();
+        assert!(
+            engines
+                .iter()
+                .any(|e| e.backend() == mtsc::sha256_backend::HashBackend::Scalar),
+            "HashEngine::supported() must always include the portable Scalar backend"
+        );
+    }
+
+    #[test]
+    fn test_hash_engine_self_check_passes_for_every_supported_backend() {
+        for engine in HashEngine::supported() {
+            assert!(
+                engine.self_check().is_ok(),
+                "self_check failed for backend {} (batch size {})",
+                engine,
+                engine.batch_size()
+            );
+        }
+    }
+
+    /// Extra cross-validation beyond `self_check`'s 5 built-in patterns: a handful of
+    /// additional realistic model/sector-value/serial combinations, run through every
+    /// supported backend and compared lane-by-lane against the scalar reference. Not
+    /// redundant with `self_check` -- different input shapes (varying model strings,
+    /// serial digit patterns) exercise different W[]-schedule/carry paths in each SIMD
+    /// kernel than the fixed patterns already covered.
+    #[test]
+    fn test_hash_batch_matches_scalar_reference_extra_patterns() {
+        let cases: [(&[u8; 16], u32); 3] = [
+            (b"ROS100G         ", 0x1800),
+            (b"VMware Virtual I", 0x4000),
+            (b"CCR1009-7G-1C-1S", 0x0001),
+        ];
+
+        for engine in HashEngine::supported() {
+            for (model, sv) in cases {
+                let sv_bytes = sv.to_le_bytes();
+                let mut batch = HashBatch::new(engine, model, &sv_bytes);
+                for lane in 0..batch.len() {
+                    let serial = format!("{:020}", lane * 7 + 1);
+                    batch.serial_mut(lane).copy_from_slice(serial.as_bytes());
+                }
+                batch.hash();
+
+                for lane in 0..batch.len() {
+                    let serial = format!("{:020}", lane * 7 + 1);
+                    let mut buf = [0u8; INPUT_LEN];
+                    buf[..SERIAL_LEN].copy_from_slice(serial.as_bytes());
+                    buf[SERIAL_LEN..SERIAL_LEN + MODEL_LEN].copy_from_slice(model);
+                    buf[SERIAL_LEN + MODEL_LEN..].copy_from_slice(&sv_bytes);
+                    let expected = sha256::hash_40(&buf);
+                    assert_eq!(
+                        batch.outputs()[lane],
+                        expected,
+                        "engine {} lane {} mismatch for model {:?}",
+                        engine,
+                        lane,
+                        model
+                    );
+                }
+            }
+        }
+    }
+}
