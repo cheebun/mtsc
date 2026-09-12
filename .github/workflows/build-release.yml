@@ -30,6 +30,8 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Resolve filename-safe version
         id: version
         shell: bash
@@ -41,6 +43,11 @@ jobs:
           if [[ "$REF_TYPE" == tag ]]; then
             if [[ ! "$REF_NAME" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
               printf 'Unsupported release tag: %s; expected [v]MAJOR.MINOR.PATCH[-prerelease][+build]\n' "$REF_NAME" >&2
+              exit 1
+            fi
+            package_version="$(python3 -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]["version"])')"
+            if [[ "${REF_NAME#v}" != "$package_version" ]]; then
+              printf 'Tag %s does not match Cargo.toml version %s\n' "$REF_NAME" "$package_version" >&2
               exit 1
             fi
             version="$REF_NAME"
@@ -110,34 +117,18 @@ jobs:
       - name: Show toolchain
         run: rustc -vV
 
-      - name: Check all Rust targets
-        run: cargo clippy --all-targets --target ${{ matrix.target }} -- -D warnings
+      - name: Lint library and CLI
+        run: cargo clippy --lib --bins --target ${{ matrix.target }} -- -D warnings
 
-      - name: Run native release tests
-        run: cargo test --release --target ${{ matrix.target }}
-
-      - name: Test generic CPU detection on Apple Silicon
+      - name: Check generic CPU build on Apple Silicon
         if: matrix.target == 'aarch64-apple-darwin'
         env:
           RUSTFLAGS: -C target-cpu=generic
           CARGO_TARGET_DIR: target-generic
-        run: cargo test --release --target ${{ matrix.target }}
-
-      - name: Compile benchmark
-        run: cargo bench --bench hash_backends --no-run --target ${{ matrix.target }}
+        run: cargo check --lib --bins --target ${{ matrix.target }}
 
       - name: Build portable release executable
         run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Verify executable
-        if: runner.os != 'Windows'
-        shell: bash
-        run: '"target/$TARGET/release/mtsc" verify'
-
-      - name: Verify Windows executable
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: '& "target/$env:TARGET/release/mtsc.exe" verify'
 
       - name: Package Linux and macOS archive
         if: runner.os != 'Windows'

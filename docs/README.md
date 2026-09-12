@@ -15,8 +15,8 @@ This directory is organized by what you're trying to do, not by when a page was 
 ## reference/ — algorithm and command reference
 
 - **[architecture.md](reference/architecture.md)** — algorithm overview and security analysis.
-- **[sha256-backends.md](reference/sha256-backends.md)** — CPU detection, native batch sizes, correctness tests, and benchmark commands.
-- **[benchmark results](benchmarks/README.md)** — measured Ryzen 7 5800H and Apple M4 performance and reproduction commands.
+- **[sha256-backends.md](reference/sha256-backends.md)** — CPU detection, native batch sizes, build checks, and runtime self-checks.
+- **[historical benchmark results](benchmarks/README.md)** — recorded Ryzen 7 5800H and Apple M4 performance measurements.
 - **[identity-marker-formula.md](reference/identity-marker-formula.md)** — how MBR `marker` bytes derive from `identity` bytes.
 - **[command-reference.md](reference/command-reference.md)** — every `mtsc` subcommand and flag explained.
 - **[toolchain.md](reference/toolchain.md)** — external projects, in-house tools, and PVE operations used in this project.

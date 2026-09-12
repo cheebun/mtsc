@@ -10,8 +10,8 @@ Machine-executable rules for all AI tools working on this Rust project.
 
 ```
 src/
-├── main.rs              CLI entry (clap subcommands) + multi-threaded search logic + tests
-├── lib.rs               SHA-256 calculation library shared with benchmarks
+├── main.rs              CLI entry (clap subcommands) + multi-threaded search logic
+├── lib.rs               SHA-256 calculation library used by the CLI
 ├── sha256_backend.rs    CPU detection, once-only calibration, backend-owned batches
 ├── sha256_cpu.rs        AArch64 detection + fail-closed macOS sysctl fallback
 ├── sha256_shani.rs      SHA-NI x1/x2/x4 multi-buffer kernels (x86_64)
@@ -20,7 +20,6 @@ src/
 ├── sha256_neon.rs       NEON x4 kernel (aarch64)
 ├── sha256_constants.rs  Shared constants (ROUND_CONSTANTS + INITIAL_HASH_VALUES)
 ├── sha256.rs            MikroTik custom SHA-256 (scalar, production) + arbitrary-length digest
-├── sha256_scalar.rs     Scalar SHA-256 backup (#[cfg(test)], for cross-validation)
 ├── sha256_simd.rs       AVX-512 SIMD 16-way parallel SHA-256
 ├── software_id.rs       Base-35 encode/decode + sector_val rounding
 ├── targets.rs           Load collision targets and derive MBR mixes
@@ -72,8 +71,7 @@ mtsc completions <shell>
 ```bash
 cargo build --release   # Portable; CPU-specific kernels selected once at startup
 RUSTFLAGS='-C target-cpu=native' cargo build --release   # Optional machine-local build
-cargo bench --bench hash_backends -- --threads 1 --seconds 1 --samples 5
-cargo test          # Architecture-gated tests; see output for count and unsupported-feature skips
+cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check   # format check
 ```
@@ -101,10 +99,12 @@ disclosure restriction from the user (currently: the 99 real-hardware CCR1009 li
 ## Code Rules
 
 - Single source of constants: `sha256_constants.rs`, shared by all SHA-256 implementations
-- Backend-owned batch size; do not assume 16 lanes in search or benchmark code
+- Backend-owned batch size; do not assume 16 lanes in search code
 - CPU feature detection and calibration are startup-only; hashing kernels must not repeat them
-- Keep generated test logs, benchmark samples, environment dumps, and build artifacts out of Git
-- CI builds/tests Linux, Windows, and macOS on x86_64 and aarch64; do not use `target-cpu=native` for distributed binaries
+- Keep generated logs, performance samples, environment dumps, and build artifacts out of Git
+- Keep only production library/CLI code; do not add automated test or standalone benchmark suites
+- Preserve production runtime verification: `mtsc verify`, `HashEngine::self_check`, and full SOFTWARE ID verification of search hits
+- CI builds all six Linux/Windows/macOS × x86_64/aarch64 targets, runs Clippy and formatting checks, and packages artifacts; do not use `target-cpu=native` for distributed binaries
 - Consistent naming: `sid_lo`/`sid_hi` (not hash_lo/d4), `max_collisions` (not target_count)
 - All public functions must have `///` doc comments
 - SHA-256 implementations must annotate the reason for byte-order conversions
@@ -133,23 +133,6 @@ Base-35 table: "TN0BYX18S5HZ4IA67DGF3LPCJQRUK9MW2VE"
 - bswap mask hoisted to function top for reuse
 - BCD incremental counter + W[5..9] precomputation
 - Full-width sid_hi lookup pre-filter (512 entries, including the required bit 8); sweep matching bypasses fixed-identity prefilter
-
-## Testing
-
-- `sha256::tests::test_6g_known_hash` — 6G VMware known hash value
-- `sha256_simd::tests::test_simd_matches_scalar` — SIMD vs scalar cross-validation
-- `sha256_simd::tests::test_simd_6g_known` — SIMD 6G known value
-- `software_id::tests::test_encode_decode_roundtrip` — encode/decode roundtrip
-- `software_id::tests::test_decode_invalid_char` — invalid character error
-- `software_id::tests::test_round_sectors` — 5 rounding verification cases
-- `convert::tests::test_roundtrip_synthetic` — sig ↔ key conversion verification
-- `main::tests` — all-supported-backend search matrix (alphabet, padding, fixed/sweep, thread offsets, u64 wrap), finite candidate exhaustion, full-SID self-verification, input validation and E2E vectors
-- `targets::tests` — identity/mix formulas, full-width target matching, sweep feasibility and legacy SID-only TOML parsing
-- `mbr_table::tests` — complete embedded table consistency and validation/fallback of partial or malformed overrides
-- `tests/cli.rs` — mtsc naming/completions, conversion reports, dual-padding check, synthetic fixed/sweep hits, custom alphabets and argument errors
-- `curve25519::tests` — EC-KCDSA verify against `TI09-7WK3`'s real, hardware-activation-confirmed
-  signature (must return `true`), plus rejection tests for a tampered signature/payload/wrong
-  public key (must return `false`) -- see `docs/investigation/license-internals.md` §8.32
 
 ## Dependencies
 

@@ -63,8 +63,8 @@ fixed-identity and full-`mbr_val` sweep modes share the selected hashing backend
 Every active result is checked and reported using its actual hashed serial.
 Candidate indices are `u64`, and `--from` is measured in millions of candidates,
 not individual MBR variants or the full mathematical `alphabet_len^20` space.
-The benchmark's BCD workload remains a decimal preparation measurement, not a
-benchmark of every alphabet/padding combination.
+The [historical benchmark's](../benchmarks/README.md) BCD workload measured
+decimal preparation, not every alphabet/padding combination.
 
 The existing scalar `hash_10`/short-digest operations and one-off `check` calls
 remain scalar. This change targets the repeated fixed-40-byte calculation layer;
@@ -88,68 +88,32 @@ detection path.
 
 Reference: [Rust 1.94 Darwin AArch64 feature detection](https://github.com/rust-lang/rust/blob/1.94.0/library/std_detect/src/detect/os/darwin/aarch64.rs).
 
-## Build and correctness tests
+## Build checks and runtime verification
 
 ```bash
 # Portable release build; each kernel has its own target_feature boundary
 cargo build --release
-cargo test
-cargo test --release
+cargo check --all-targets
 cargo fmt --check
-cargo clippy --lib -- -D warnings
+cargo clippy --all-targets -- -D warnings
 
-# Explicit baseline AArch64 CPU: exercise runtime detection on the Mac
-RUSTFLAGS='-C target-cpu=generic' CARGO_TARGET_DIR=target-generic cargo test --release
+# Explicit baseline AArch64 build, then exercise runtime detection on macOS
+RUSTFLAGS='-C target-cpu=generic' CARGO_TARGET_DIR=target-generic cargo build --release
+./target-generic/release/mtsc verify
 
 # Machine-local optimization only; do not distribute to older CPUs
 RUSTFLAGS='-C target-cpu=native' cargo build --release
 ```
 
-All supported engines are compared lane-by-lane with the original production
-scalar and the independent backup scalar. Cases include the known 6G result,
-random binary serials, decimal serials, varied model/sector tails, all-zero and
-high-bit patterns, reused output storage, and output canaries. Unsupported
-instruction sets are not executed. In particular, a test function reporting
-`ok` after printing `SKIP` is not evidence of hardware validation.
+`HashEngine::self_check` compares supported engines against the production
+scalar implementation before startup calibration. Unsupported instruction sets
+are not executed; compilation alone is not evidence of hardware validation.
+The production `mtsc verify` command checks the SOFTWARE ID pipeline, and search
+hits are independently recomputed as full SOFTWARE IDs before reporting.
 
-## Reproducible benchmark
+## Historical performance measurements
 
-```bash
-# Every supported backend, including hardware-SHA x1/x2/x4
-cargo bench --bench hash_backends -- --threads 1 --seconds 1 --samples 5 --warmup 0.3
-
-# Focus on 5800H SHA-NI vs AVX2
-cargo bench --bench hash_backends -- --backend sha-ni --backend avx2 --threads 16 --seconds 1 --samples 5 --warmup 0.3
-
-# Focus on M4 ARM SHA2 vs NEON
-cargo bench --bench hash_backends -- --backend arm-sha2 --backend neon --threads 10 --seconds 1 --samples 5 --warmup 0.3
-
-# Test an exact multi-buffer width
-cargo bench --bench hash_backends -- --backend sha-ni --lanes 2 --threads 16
-
-# Include BCD serial generation and thread stride, but not target lookup or I/O
-cargo bench --bench hash_backends -- --mode serial --threads 16 --seconds 1 --samples 5 --warmup 0.3
-```
-
-The benchmark needs no key/license file. Unsupported explicitly requested
-backends fail rather than silently falling back. `--lanes` selects an existing
-specialization, not an arbitrary width. There is no throughput timing inside the
-search hot path.
-
-Every sample reports hashes/s, counting all active lanes. Each worker initializes
-storage before a common start. Measurement lasts at least the requested duration;
-the aggregate rate divides all completed hashes by the slowest worker's elapsed
-time. Clock reads occur every 256 kernel calls, not every hash. Inputs and all
-outputs cross `black_box` barriers to prevent elimination. Five rotating-order
-samples report median/min/max; warm-up and self-check time are excluded.
-
-`--mode hash` measures changing one input byte, actual batch dispatch, input
-loading, compression, and output storage/observation. It is not an isolated
-compression-instruction benchmark. `--mode serial` additionally includes the
-search-style BCD preparation/stride, but excludes target matching, stop checks,
-progress reporting, and license work. Neither number should be labeled full
-application search throughput.
-
-See the [measured 5800H and M4 performance summary](../benchmarks/README.md).
-Generated logs and individual samples are not committed; rerun the benchmark
-above to collect measurements on the current machine.
+The [5800H and M4 performance summary](../benchmarks/README.md) preserves the
+recorded measurements and their methodology. The standalone benchmark program
+is no longer included. Its hash and decimal serial-preparation rates exclude
+target lookup and I/O; neither represents full application search throughput.

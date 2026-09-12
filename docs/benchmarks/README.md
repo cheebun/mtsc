@@ -1,8 +1,11 @@
-# SHA-256 backend performance
+# Historical SHA-256 backend performance
 
 Measured on 2026-09-12 using a Ryzen 7 5800H workstation and an Apple M4 reached
 through SSH. Results are **M hashes/s** (millions of hashes per second), medians
 of five one-second samples after 0.3 seconds of warm-up per backend.
+
+These are historical measurements. The standalone benchmark program used for
+these runs is no longer included in the project.
 
 ## Environment and method
 
@@ -48,7 +51,7 @@ progress output, or license work: these are **not full search throughput**.
 1.80 times AVX2 x8; 16-worker hash favors x2, about 1.91 times AVX2 x8. Prefer
 x2 for the measured serial-preparation workload. Eight-worker hash x2/x4 rates
 are within 0.3%, not a meaningful winner. SHA-NI x1 is slower than AVX2 x8 in the
-single-worker hash test, demonstrating why multi-buffer variants matter.
+single-worker hash measurement, demonstrating why multi-buffer variants matter.
 
 Windows results fluctuate on the running workstation. For example, 16-worker
 serial-mode SHA-NI x2 ranged from 93.71 to 141.83 M/s, versus AVX2's 82.07 to
@@ -94,27 +97,17 @@ SHA-NI/ARM SHA2 families in these runs, but close hardware-SHA widths sometimes
 changed order. It does not measure BCD preparation or target lookup and cannot
 guarantee the best end-to-end search backend under every subsequent load.
 
-- Windows debug/release: 84 test functions reported passing (19 library + 65
-  CLI); three AVX-512 tests returned early because that CPU lacks AVX-512.
-- Mac debug/release and explicit `target-cpu=generic` release: 85 tests passed
-  (20 library + 65 CLI), including hardware execution of ARM SHA2 and NEON.
+- For these measurements, `HashEngine::self_check` compared supported engines
+  with the production scalar implementation before calibration and timing.
 - Calculation-library Clippy with warnings denied and formatting checks passed
-  on both hosts. Full-project Clippy retains unrelated preexisting warnings.
-- AVX-512 remains compiled and has gated scalar-comparison tests, but no
-  AVX-512-capable host was available for this measurement session. No AVX-512
-  hardware performance or correctness claim is made.
+  on both hosts. At measurement time, full-project Clippy still had unrelated
+  preexisting warnings.
+- AVX-512 remains compiled, but no AVX-512-capable host was available for this
+  measurement session. No AVX-512 hardware performance or correctness claim
+  is made.
 
 Generated logs, individual samples, host inventories, temporary paths, and
-lockfile snapshots are deliberately not stored in Git. The benchmark and unit
-test source are retained so measurements can be reproduced.
+lockfile snapshots are deliberately not stored in Git. The tables above preserve
+the historical results, not a currently runnable benchmark suite.
 
-## Reproduce
-
-```bash
-cargo bench --bench hash_backends -- --threads 1 --seconds 1 --samples 5 --warmup 0.3
-cargo bench --bench hash_backends -- --backend sha-ni --backend avx2 --threads 16
-cargo bench --bench hash_backends -- --backend arm-sha2 --backend neon --threads 10
-cargo bench --bench hash_backends -- --mode serial --threads 16
-```
-
-See [backend design and test commands](../reference/sha256-backends.md).
+See [current backend design and runtime verification](../reference/sha256-backends.md).

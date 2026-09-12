@@ -1,7 +1,7 @@
 //! MikroTik custom SHA-256 shared constants
 //!
-//! Shared by `sha256.rs`, `sha256_scalar.rs`, and `sha256_simd.rs`,
-//! avoiding the maintenance risk of three duplicated definitions.
+//! Shared by all SHA-256 backends and the license metadata decoder,
+//! avoiding duplicated definitions.
 
 /// MikroTik custom SHA-256 round constants (64 u32)
 ///

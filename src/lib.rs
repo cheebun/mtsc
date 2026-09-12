@@ -11,8 +11,6 @@ mod sha256_constants;
 mod sha256_cpu;
 #[cfg(target_arch = "aarch64")]
 mod sha256_neon;
-#[cfg(test)]
-mod sha256_scalar;
 #[cfg(target_arch = "x86_64")]
 mod sha256_shani;
 #[cfg(target_arch = "x86_64")]

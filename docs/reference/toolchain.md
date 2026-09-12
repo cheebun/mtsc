@@ -58,11 +58,16 @@ mtsc check --serial <Serial> --disk-size <N> --unit <g|m|k|b> --model <model> --
 
 `check` defaults to all-zero identity if omitted, not a sweep. It prints both zero- and space-padding variants for a short numeric serial, but only once if the resulting 20-byte input is identical.
 
-### Test
+### Build checks and runtime self-check
 
 ```bash
-cargo test
+cargo check --all-targets
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+mtsc verify
 ```
+
+`verify` runs the production algorithm self-check without a key/license file.
 
 ---
 

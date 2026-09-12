@@ -58,7 +58,7 @@ Sizes use powers of 1024. Each unit has a separate integer minimum, enforcing at
 
 Decimal sizes are not supported (`--disk-size` is an integer) -- fractional GiB values must be expressed in a smaller unit instead, e.g. `--disk-size 1536 --unit m` for 1.5 GiB. This avoids floating-point rounding errors in the byte-exact `sector_val` calculation.
 
-Progress uses millions of candidate hashes, with a nominal interval of 10,000M (10 billion), e.g. `10000M hashes, 5s, 0 found`. Sweeping 2048 `mbr_val` values reuses each candidate's hash; it does not multiply the `--from` index by 2048. Wall-clock intervals vary by backend and workload; the [backend benchmarks](../benchmarks/README.md) are not full search throughput.
+Progress uses millions of candidate hashes, with a nominal interval of 10,000M (10 billion), e.g. `10000M hashes, 5s, 0 found`. Sweeping 2048 `mbr_val` values reuses each candidate's hash; it does not multiply the `--from` index by 2048. Wall-clock intervals vary by backend and workload; the [historical backend measurements](../benchmarks/README.md) are not full search throughput.
 
 ## `mtsc check`
 

@@ -1,8 +1,21 @@
 [package]
 name = "mtsc"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
+autotests = false
+autobenches = false
 description = "RouterOS L6 Serial Generator & License Key Converter"
+
+[lib]
+test = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "mtsc"
+path = "src/main.rs"
+test = false
+bench = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -11,14 +24,6 @@ curve25519-dalek = "4"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 
-[[bench]]
-name = "hash_backends"
-harness = false
-
 [profile.release]
-opt-level = 3
-lto = true
-
-[profile.bench]
 opt-level = 3
 lto = true

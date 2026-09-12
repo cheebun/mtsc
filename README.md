@@ -142,8 +142,8 @@ More keys = faster search (linear speedup).
 ├── README.md
 ├── CLAUDE.md / AGENTS.md    AI tool instructions
 ├── src/
-│   ├── main.rs              CLI entry + multi-threaded search engine + unit tests
-│   ├── lib.rs               Reusable calculation layer for CLI and benchmarks
+│   ├── main.rs              CLI entry + multi-threaded search engine
+│   ├── lib.rs               Reusable calculation layer for the CLI
 │   ├── sha256_backend.rs    CPU dispatch, startup calibration, dynamic batch owner
 │   ├── sha256_cpu.rs        AArch64 detection and macOS sysctl compatibility
 │   ├── sha256_shani.rs      SHA-NI x1/x2/x4 multi-buffer kernels
@@ -153,7 +153,6 @@ More keys = faster search (linear speedup).
 │   ├── sha256_constants.rs  MikroTik SHA-256 shared constants (IV + K)
 │   ├── sha256.rs            MikroTik custom SHA-256 (scalar, production)
 │   ├── sha256_simd.rs       AVX-512 SIMD 16-way parallel SHA-256
-│   ├── sha256_scalar.rs     Scalar SHA-256 backup (for test cross-validation)
 │   ├── software_id.rs       Base-35 encode/decode + sector_val rounding
 │   ├── targets.rs           Load collision targets and derive MBR mixes
 │   ├── mbr_table.rs         Validate identity/marker lookup table overrides
@@ -170,30 +169,11 @@ More keys = faster search (linear speedup).
 
 ## Performance
 
-Benchmark the actual machine rather than inferring performance from SIMD width:
-
-```bash
-cargo bench --bench hash_backends -- --threads 1 --seconds 1 --samples 5 --warmup 0.3
-cargo bench --bench hash_backends -- --mode serial --threads 16 --seconds 1 --samples 5 --warmup 0.3
-```
-
-On the tested Ryzen 7 5800H, SHA-NI multi-buffer beats AVX2 x8. On Apple M4,
-ARM SHA2 beats NEON x4. The best hardware-SHA buffer count depends on thread
-count; startup calibration tests the requested concurrency. AVX-512 remains
-available on CPUs that support it, but neither tested machine provides it.
-
-See [backend design and benchmark options](docs/reference/sha256-backends.md)
-and [measured performance summary](docs/benchmarks/README.md). Hash-kernel
-throughput and serial-preparation throughput are reported separately; neither
-is a claim of full application search speed or expected collision time.
-
-## Testing
-
-```bash
-cargo test
-cargo clippy --all-targets -- -D warnings
-cargo fmt --check
-```
+Startup calibration selects a supported CPU backend at the requested thread
+count; SIMD width alone does not determine performance. See
+[backend design](docs/reference/sha256-backends.md) and the
+[historical performance measurements](docs/benchmarks/README.md). Those
+measurements are not full application search speed or expected collision time.
 
 ## Dependencies
 
