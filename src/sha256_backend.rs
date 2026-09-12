@@ -275,10 +275,10 @@ impl HashBatch {
 /// Precompute the SHA-256 big-endian words for a shared model/sector-value suffix.
 pub fn precompute_constant_words(model: &[u8; 16], sector_value: &[u8; 4]) -> [u32; 5] {
     let mut words = [0; 5];
-    for (word, bytes) in words[..4].iter_mut().zip(model.chunks_exact(4)) {
+    for (word, bytes) in words[..4].iter_mut().zip(model.as_chunks::<4>().0) {
         // Input bytes are consumed big-endian by SHA-256, even though the sector
         // value itself was serialized little-endian by RouterOS.
-        *word = u32::from_be_bytes(bytes.try_into().unwrap());
+        *word = u32::from_be_bytes(*bytes);
     }
     words[4] = u32::from_be_bytes(*sector_value);
     words

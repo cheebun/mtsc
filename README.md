@@ -20,20 +20,10 @@ cargo build --release
 RUSTFLAGS='-C target-cpu=native' cargo build --release
 ```
 
-## CI and downloads
+## Downloads
 
-GitHub Actions builds and tests native **Linux, Windows, and macOS**, each on
-**x86_64 and ARM64**. Every build compiles the benchmark without running timings,
-checks the calculation library with Clippy, and uploads a platform archive with
-a SHA-256 checksum. Apple Silicon also tests explicit generic-CPU detection.
-
-Branch pushes, pull requests to `main`, and manual workflow dispatch run CI.
-Tags such as `v0.3.0`, `0.3.0`, or `v0.3.0-rc.1` publish all six platform
-archives to a GitHub Release only after version validation, all builds, and
-formatting checks pass. Release tags must use a filename-safe
-`[v]MAJOR.MINOR.PATCH[-prerelease][+build]` form. Linux archives
-use GNU libc; musl, 32-bit, mobile, and WebAssembly targets are not included.
-Builds use the portable target defaults, not `target-cpu=native`.
+Download available binaries from [GitHub Releases](https://github.com/feewg/ros-serialgen/releases).
+Supports Linux, Windows, and macOS on x86_64 and ARM64.
 
 ## Usage
 
