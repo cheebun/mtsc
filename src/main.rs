@@ -343,7 +343,7 @@ struct SearchContext {
     targets: Arc<Vec<targets::Target>>,
     /// `Some` only in full-mbr_val-sweep mode (no `--identity` given); `targets` above is
     /// left empty in that case. See `sweep_check_match`.
-    raw_targets: Option<Arc<Vec<targets::RawTarget>>>,
+    raw_targets: Option<Arc<targets::RawTargets>>,
     /// `Some` only in full-mbr_val-sweep mode -- pairs with `raw_targets`.
     mbr_table: Option<Arc<mbr_table::MbrTable>>,
     /// Where padding goes for numeric candidate serials shorter than `SERIAL_LEN` bytes
@@ -913,7 +913,7 @@ fn print_sweep_search_banner(
     model: &str,
     sector_val: u32,
     num_threads: usize,
-    targets: &[targets::RawTarget],
+    targets: &targets::RawTargets,
     count: usize,
     start_serial: u64,
     engine: HashEngine,
@@ -965,10 +965,12 @@ fn print_sweep_search_banner(
     }
     println!();
 
-    for t in targets {
+    for (i, (&tv_lo, &tv_hi)) in targets.tv_lo.iter().zip(targets.tv_hi.iter()).enumerate() {
         println!(
             "  {} tv_lo=0x{:08X} tv_hi=0x{:02X}",
-            t.name, t.tv_lo, t.tv_hi
+            targets.name(i),
+            tv_lo,
+            tv_hi
         );
     }
     println!("\nSearching...\n");
@@ -1146,9 +1148,12 @@ fn check_match(serial_num: u64, sid_lo: u32, sid_hi: u8, ctx: &SearchContext) {
 /// Re-profiled: that specific cost dropped to ~0%, but an equivalent (slightly larger)
 /// cost reappeared as a bounds-check comparison plus `Vec`-internal pointer reads --
 /// net effect was a wash, not an improvement. Reverted rather than keeping `unsafe` code
-/// that adds review/maintenance cost for zero measured benefit. The real lever for the
-/// ~75% spent in `required_mix`/`feasible_mbr_val` themselves is SIMD, not this kind of
-/// loop-mechanics shuffling -- see `docs/benchmarks/README.md`.
+/// that adds review/maintenance cost for zero measured benefit. Also per the same
+/// profiling, `ctx.raw_targets` is now `targets::RawTargets`, a structure-of-arrays layout
+/// (flat `tv_lo`/`tv_hi`) instead of a `Vec` of one struct per target -- see
+/// `docs/benchmarks/README.md`. The real lever for the ~75% spent in
+/// `required_mix`/`feasible_mbr_val` themselves is SIMD, not loop-mechanics shuffling; SoA
+/// is a prerequisite for that, not a replacement for it.
 fn sweep_check_match(
     serial_num: u64,
     sid_lo: u32,
@@ -1162,8 +1167,9 @@ fn sweep_check_match(
         .expect("sweep_check_match requires SearchContext::raw_targets");
 
     debug_assert!(hits.is_empty(), "caller must pass a drained scratch buffer");
-    for (i, t) in raw_targets.iter().enumerate() {
-        let required = targets::required_mix(sid_lo, sid_hi, t.tv_lo, t.tv_hi);
+    let tv_pairs = raw_targets.tv_lo.iter().zip(raw_targets.tv_hi.iter());
+    for (i, (&tv_lo, &tv_hi)) in tv_pairs.enumerate() {
+        let required = targets::required_mix(sid_lo, sid_hi, tv_lo, tv_hi);
         if let Some(mbr_val) = targets::feasible_mbr_val(required) {
             hits.push((i, mbr_val));
         }
@@ -1178,10 +1184,10 @@ fn sweep_check_match(
         .as_ref()
         .expect("sweep_check_match requires SearchContext::mbr_table");
     for &(i, mbr_val) in hits.iter() {
-        let t = &raw_targets[i];
+        let name = raw_targets.name(i);
         let (identity_hex, marker_hex) = mbr_table.lookup(mbr_val);
         let mix = targets::mix_from_identity(&parse_identity_hex(identity_hex));
-        let (sbuf, sid) = verify_search_hit(serial_num, (sid_lo, sid_hi), mix, &t.name, ctx)
+        let (sbuf, sid) = verify_search_hit(serial_num, (sid_lo, sid_hi), mix, name, ctx)
             .unwrap_or_else(|error| {
                 eprintln!("FATAL: {error}");
                 std::process::exit(1);
@@ -1190,7 +1196,7 @@ fn sweep_check_match(
         let serial_str = std::str::from_utf8(&sbuf).unwrap();
         println!(
             "FOUND [{}] serial={} target={} mbr_val={} identity={} marker={} verified={}",
-            n, serial_str, t.name, mbr_val, identity_hex, marker_hex, sid
+            n, serial_str, name, mbr_val, identity_hex, marker_hex, sid
         );
 
         if ctx.max_collisions > 0 && n >= ctx.max_collisions {

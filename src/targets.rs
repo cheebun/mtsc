@@ -122,27 +122,57 @@ pub fn marker_from_identity(identity: &[u8; 10]) -> [u8; 2] {
     raw16_from_identity(identity).to_le_bytes()
 }
 
-/// Raw, un-masked SOFTWARE ID target value -- unlike `Target`, not baked against any one
-/// fixed mix, so it can be checked against every possible `mbr_val` (0-2047) instead of
-/// just the single identity `load_targets` was called with. See `required_mix()` /
+/// Raw, un-masked SOFTWARE ID targets for the full-`mbr_val`-space search (`search` without
+/// `--identity`) -- unlike `Target`, not baked against any one fixed mix, so each target can
+/// be checked against every possible `mbr_val` (0-2047). See `required_mix()` /
 /// `feasible_mbr_val()`.
-pub struct RawTarget {
-    /// SOFTWARE ID (e.g. "XXXX-XXXX")
-    pub name: String,
-    /// Low 32 bits of the decoded, un-masked target value
-    pub tv_lo: u32,
-    /// High bits (>>32) of the decoded, un-masked target value
-    pub tv_hi: u32,
-    /// MBR signature hex (64 bytes), kept for parity with `Target` -- not currently printed
-    /// by the sweep's hit report, which only needs the SOFTWARE ID name.
+///
+/// Structure-of-arrays layout, not a `Vec` of one struct per target (2026-09-13, per real
+/// `perf` profiling -- see `docs/benchmarks/README.md`'s "Future optimization
+/// opportunities"): `tv_lo`/`tv_hi` are flat, parallel arrays holding the *only* fields
+/// `sweep_check_match`'s hot per-candidate scan loop touches, so that loop's working set is
+/// `len * 8` bytes (comfortably L1-resident even at several thousand targets) instead of
+/// striding over a struct that also carries a `name: String` per entry. `names` is separate,
+/// same index correspondence, read only on the (astronomically rare) hit-reporting path.
+/// `signature_hex` was dropped entirely in this same pass -- it was already `#[allow(dead_code)]`
+/// and, confirmed via `grep`, never actually read from this type anywhere (the sweep hit
+/// report only needs the SOFTWARE ID name; a *different* type, `Target`, is what
+/// `check --license`'s signature printing actually uses).
+pub struct RawTargets {
+    /// Low 32 bits of each target's decoded, un-masked value.
+    pub tv_lo: Vec<u32>,
+    /// High bits (>>32) of each target's decoded, un-masked value.
+    pub tv_hi: Vec<u32>,
+    names: Vec<String>,
+}
+
+impl RawTargets {
+    /// Number of loaded targets. `tv_lo`/`tv_hi`/`names` are always the same length.
+    pub fn len(&self) -> usize {
+        self.tv_lo.len()
+    }
+
+    /// Whether any targets were loaded. Exists to pair with `len()` (clippy's
+    /// `len_without_is_empty`) and for tests -- `load_raw_targets` itself already exits the
+    /// process before ever constructing an empty `RawTargets`, so no production code calls
+    /// this. `#[allow(dead_code)]` per this project's documented clippy exception
+    /// (`AGENTS.md`: "cargo clippy zero warnings (except dead_code)").
     #[allow(dead_code)]
-    pub signature_hex: String,
+    pub fn is_empty(&self) -> bool {
+        self.tv_lo.is_empty()
+    }
+
+    /// SOFTWARE ID name for the target at `index` -- only meaningful for an index
+    /// `sweep_check_match`'s scan already flagged as feasible via `tv_lo`/`tv_hi`.
+    pub fn name(&self, index: usize) -> &str {
+        &self.names[index]
+    }
 }
 
 /// Load un-masked collision targets from keys.toml, for the full-`mbr_val`-space search
 /// (`search` without `--identity`). Exits with error if keys.toml is not
 /// found or empty (same policy as `load_targets`).
-pub fn load_raw_targets(config_path: Option<&str>) -> Vec<RawTarget> {
+pub fn load_raw_targets(config_path: Option<&str>) -> RawTargets {
     let entries = config_path
         .and_then(load_from_file)
         .or_else(|| load_from_file("keys.toml"))
@@ -154,19 +184,21 @@ pub fn load_raw_targets(config_path: Option<&str>) -> Vec<RawTarget> {
     }
 
     eprintln!("Loaded {} keys from config", entries.len());
-    entries
-        .iter()
-        .map(|e| {
-            let tv = software_id::decode(&e.software_id)
-                .unwrap_or_else(|err| panic!("invalid SOFTWARE ID in config: {}", err));
-            RawTarget {
-                name: e.software_id.clone(),
-                tv_lo: tv as u32,
-                tv_hi: (tv >> 32) as u32,
-                signature_hex: e.signature_hex.clone(),
-            }
-        })
-        .collect()
+    let mut tv_lo = Vec::with_capacity(entries.len());
+    let mut tv_hi = Vec::with_capacity(entries.len());
+    let mut names = Vec::with_capacity(entries.len());
+    for e in &entries {
+        let tv = software_id::decode(&e.software_id)
+            .unwrap_or_else(|err| panic!("invalid SOFTWARE ID in config: {}", err));
+        tv_lo.push(tv as u32);
+        tv_hi.push((tv >> 32) as u32);
+        names.push(e.software_id.clone());
+    }
+    RawTargets {
+        tv_lo,
+        tv_hi,
+        names,
+    }
 }
 
 /// Compute the `mix` a real MBR identity would need to produce for a candidate
@@ -322,6 +354,38 @@ mod tests {
             std::env::temp_dir().join(format!("mtsc_test_{}_{}.toml", name, std::process::id()));
         fs::write(&path, content).expect("write temp keys.toml");
         path.to_str().unwrap().to_string()
+    }
+
+    /// `RawTargets`' structure-of-arrays layout must keep `tv_lo`/`tv_hi`/`name` correctly
+    /// correlated by index -- the entire point of splitting them into parallel arrays
+    /// (2026-09-13, see `docs/benchmarks/README.md`) is void if index `i` in one array
+    /// doesn't correspond to index `i` in the others. Uses two real, known-valid SOFTWARE
+    /// IDs already used elsewhere in this project's tests (not `TEST-0001`-style
+    /// placeholders, which aren't valid base-35 and would panic `load_raw_targets`).
+    #[test]
+    fn test_load_raw_targets_soa_correspondence() {
+        let path = write_temp_keys_toml(
+            "raw_soa",
+            "[[key]]\nsoftware_id = \"TI09-7WK3\"\nsignature_hex = \"AA\"\n\n[[key]]\nsoftware_id = \"VI8Q-E90F\"\nsignature_hex = \"BB\"\n",
+        );
+        let raw = load_raw_targets(Some(&path));
+        let _ = fs::remove_file(path);
+
+        assert_eq!(raw.len(), 2);
+        assert!(!raw.is_empty());
+        assert_eq!(raw.tv_lo.len(), 2);
+        assert_eq!(raw.tv_hi.len(), 2);
+
+        for (i, id) in ["TI09-7WK3", "VI8Q-E90F"].iter().enumerate() {
+            assert_eq!(raw.name(i), *id);
+            let tv = software_id::decode(id).unwrap();
+            assert_eq!(raw.tv_lo[i], tv as u32, "tv_lo mismatch at index {i}");
+            assert_eq!(
+                raw.tv_hi[i],
+                (tv >> 32) as u32,
+                "tv_hi mismatch at index {i}"
+            );
+        }
     }
 
     #[test]
