@@ -81,7 +81,15 @@ pub struct LicenseMetadata {
     /// Byte 6 of the decrypted block. Not labeled by the reference MTLic `ParseLic.py` --
     /// meaning unconfirmed, printed as-is.
     pub version_byte: u8,
+    /// `nlevel` -- the low nibble of decrypted byte 7. NOT the whole byte: see
+    /// `docs/investigation/license-internals.md` §8.52, disassembled directly from real
+    /// `keyman`'s shared license-info function -- the low/high nibbles of this byte are two
+    /// distinct fields (`nlevel`/`features`), not one flat 0-255 value.
     pub level: u8,
+    /// `features` -- the high nibble of decrypted byte 7, with its own top bit (the
+    /// original byte's `0x80`) masked off by real `keyman`, giving a 3-bit flags value
+    /// (0-7). Zero on virtually all real-world signed licenses (§8.52).
+    pub features: u8,
     /// Whether bytes 8..16 of the decrypted block are all zero, as expected for a well-formed
     /// signature. `false` means either this isn't a real signature or the decode is wrong.
     pub padding_ok: bool,
@@ -95,7 +103,8 @@ pub struct LicenseMetadata {
 ///
 /// Confirmed against the reference implementation (`MT_Transform` in MTLic's `MTTools.py`,
 /// https://github.com/Ygnecz/MTLic): a signature's first 16 bytes, run through this transform,
-/// decode to `SOFTWARE_ID(6B LE) || reserved(1B) || level(1B) || zero-padding(8B)`.
+/// decode to `SOFTWARE_ID(6B LE) || reserved(1B) || level_byte(1B) || zero-padding(8B)`, where
+/// `level_byte` itself packs two fields, not one -- see `LicenseMetadata::level`/`::features`.
 pub fn decode_metadata(signature_hex: &str) -> Result<LicenseMetadata, String> {
     let (block, nonce_hash, signature) = decode_verify_inputs(signature_hex)?;
 
@@ -105,7 +114,8 @@ pub fn decode_metadata(signature_hex: &str) -> Result<LicenseMetadata, String> {
     Ok(LicenseMetadata {
         software_id: crate::software_id::encode(software_id_val),
         version_byte: block[6],
-        level: block[7],
+        level: block[7] & 0x0F,
+        features: (block[7] >> 4) & 0x07,
         padding_ok: block[8..].iter().all(|&b| b == 0),
         nonce_hash: hex_encode(&nonce_hash),
         signature: hex_encode(&signature),
@@ -489,6 +499,26 @@ mod tests {
         let meta = decode_metadata(sig).unwrap();
         assert_eq!(meta.software_id, "VI8Q-E90F");
         assert_eq!(meta.level, 1);
+        assert_eq!(meta.features, 0);
         assert!(meta.padding_ok);
+    }
+
+    #[test]
+    fn test_decode_metadata_splits_level_byte_into_nlevel_and_features() {
+        // Real signature_hex decoded from a keygen_x86-generated sample this session
+        // (docs/investigation/mikrotikpatch-keygen/01-dynamic-analysis-keygen-x86.md §6) --
+        // its level byte is 0x16, the first real data point this project has seen with a
+        // non-zero high nibble (every previously-tested real license happened to have
+        // level_byte < 0x10, so this distinction was untested before). Per
+        // docs/investigation/license-internals.md §8.52 (disassembled directly from real
+        // `keyman`'s shared license-info function, 0x8051a9c-0x8052188): the level byte is
+        // NOT a flat 0-255 value -- `nlevel` is the low nibble, `features` is the high
+        // nibble with its own top bit (0x80 of the original byte) masked off, giving a
+        // 3-bit flags value. 0x16 = 0001_0110 -> nlevel=6, features=1, not "level 22".
+        let sig = "3CFC82BF13C44FB40C51F935CD993D801072DCB4A08D9D5E26F607305D94BEC4A17588D49EB06222864A51F062EC39BDD7CAFEAE823268AB65116E7996EC9203";
+        let meta = decode_metadata(sig).unwrap();
+        assert_eq!(meta.software_id, "2FJ5-TZ4V");
+        assert_eq!(meta.level, 6, "nlevel must be the low nibble of 0x16");
+        assert_eq!(meta.features, 1, "features must be the high nibble of 0x16");
     }
 }

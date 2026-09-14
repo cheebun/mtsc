@@ -1257,6 +1257,7 @@ fn print_metadata(signature_hex: &str) {
             println!("  Software ID: {}", m.software_id);
             println!("  Router OS Version: {}", m.version_byte);
             println!("  License Level: {}", m.level);
+            println!("  Features: {}", m.features);
             println!("  Nonce Hash: {}", m.nonce_hash);
             println!("  Signature: {}", m.signature);
 

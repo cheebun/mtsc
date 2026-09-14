@@ -1784,4 +1784,34 @@ Two separate code changes followed directly from §8.62's real-hardware confirma
 
 Verified end-to-end on `hkg-land-03`: 91 tests (90 passed, 1 pre-existing `#[ignore]`d performance test), clean `clippy`/`fmt`, `search --help` showing `--pad <start|end>` with `end` as the documented default, and a live `search` run's startup banner printing `Serial pad: end (right-pad with spaces, natural digit count, default)`.
 
+### 8.64 MBR offset `0x150`'s consumer located directly in a real x86 `keyman` binary -- a standalone bit-read function, independent of the `nv::ROSMode` mechanism -- confirming (not just inferring) the `docs/investigation/mikrotikpatch-keygen/01-dynamic-analysis-keygen-x86.md` §5 `00`=x86/`01`=CHR finding
+
+Closes that report's open item 3 ("`0x150` 具体被哪段代码消费尚未确认").
+
+**Extraction method** (official, publicly downloadable RouterOS install ISOs, no license/keygen material involved): both an x86 ISO (`routeros-7.24.2.npk`) and an ARM64 ISO (`routeros-7.23.3-arm64.npk`) were mounted (`hdiutil attach` + `mount -t cd9660` on macOS) and their embedded `.npk` packages extracted via the `.npk` format already documented in §8.42 (`dd skip=4096` past the package-metadata header, then `unsquashfs` the xz-compressed SquashFS 4.0 image that follows to EOF). This yielded full `nova/bin/*` and `lib/*.so` trees for both architectures.
+
+**Step 1 -- confirmed `nv::ROSMode`/`nv::rosMode()`/`ROSModeValue::hasFeature()` exist identically on both architectures**, implemented in `lib/libumsg.so` (shared by all `nova/bin/*` binaries) with persistence to `/rw/rosmode.msg` and `/nova/store/rosmode` (found as literal error-message strings: `"ERROR: ROSMode::save failed"`, `"ERROR: ROSMode access failed"`). `nova/bin/loader`, `sbin/sysinit`, and `nova/bin/moduler` all import these two symbols (confirmed via `objdump -T`). **`nova/bin/keyman` does NOT import either symbol** -- meaning `keyman`'s own x86/CHR license-format decision does not go through this shared-library mechanism at all, contrary to this session's initial assumption.
+
+**Step 2 -- found `keyman`'s own, independent MBR-bit-0 read, directly in its `.text` section** (x86 build, `objdump -d nova/bin/keyman`, function at `0x804bfb5`):
+
+```asm
+804bfb5: cmpw   $0xaa55, 0x1fe(%eax)   ; standard MBR boot-signature check (bytes 0x1FE-0x1FF)
+804bfbe: jne    0x804bfca              ; invalid MBR -> return 0
+804bfc0: movl   0x150(%eax), %eax      ; load 4 bytes at MBR offset 0x150
+804bfc6: andl   $0x1, %eax             ; keep only the lowest bit
+804bfc9: retl                          ; return that bit
+804bfca: xorl   %eax, %eax             ; invalid MBR -> return 0
+804bfcc: retl
+```
+
+i.e. `bool read_chr_mode_bit(uint8_t *mbr_512_byte_buf) { return valid_mbr_signature(buf) ? (*(u32*)(buf+0x150) & 1) : 0; }` -- a small, self-contained predicate, not part of the `ROSMode` class hierarchy.
+
+**This matches the keygen's dynamic observation exactly**: `docs/investigation/mikrotikpatch-keygen/01-dynamic-analysis-keygen-x86.md` §5 found `keygen_x86 chr`/`x86` write a full byte (`01`/`00`) at MBR offset `0x150`; `keyman`'s reader only actually examines bit 0 of that offset (masked via `& 1`), so a full-byte `00`/`01` write is exactly what this reader expects -- two independent analyses (one dynamic/black-box against the keygen, one static against real RouterOS binaries) converging on the same offset and the same bit semantics.
+
+**Net effect on open questions from prior sections:**
+
+- **Resolves** `01-dynamic-analysis-keygen-x86.md` open item 3: `0x150` bit 0 is read directly inside `keyman` itself via this standalone function, not (at least not primarily) through `ROSMode`. Whether `ROSMode`/`hasFeature()` (used by `loader`/`sysinit`/`moduler`) separately gates driver probing is a **distinct, still-unconfirmed question** -- `moduler`'s actual call site for `hasFeature()` was not located this session (PLT/GOT cross-reference search came up empty with `objdump -d -R`; would need proper decompilation, e.g. IDA, to resolve cleanly).
+- **Supports** (does not yet fully prove) the earlier "x86/CHR share one driver set, switched purely at the licensing layer" hypothesis (§ conversation preceding this entry, cross-referencing the `mikrotik-gpl` single-`x86_64.config` finding): the confirmed consumer of `0x150` is inside `keyman` (a licensing binary), not inside any driver-loading code path traced so far.
+- **Not yet done**: locating this bit-read function's own caller(s) inside `keyman`, to confirm the returned bit actually selects between `SOFTWARE-ID`/`nlevel` (x86) and `system_id`/`level` (CHR) parsing -- plausible given the function's name-free but purpose-obvious shape, but not directly observed yet.
+
 **Process note, not a code finding**: while running a `search` sanity-check invocation to verify the new default banner text, an agent's test command printed this project's full loaded `keys.toml` target list (as `search`'s own startup banner always does) to its own tool-call output, which included the `serial` field of three `private=true`-marked entries (`WUB2-EYCK`/`HCC0-4FJR`/`XU4M-NJ40`). The agent caught this itself, did not repeat the raw values in its final report, and the exposure was contained to that one agent's own internal tool-call transcript (not this document, not the main session's visible output). Recorded here as a reminder for future sessions: **any `search`/`check` invocation that loads the real `keys.toml` will print every loaded target's identifying fields to stdout as part of its normal startup banner** -- sanity-check runs meant only to verify CLI plumbing (not to search against real targets) should pass `--keys` pointing at a minimal/synthetic keys file, or filter to a single known-non-private entry, rather than loading the full real database.

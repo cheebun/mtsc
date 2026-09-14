@@ -13,5 +13,8 @@ Cargo.lock
 chr-license-data.md
 chr-system-id-formula.md
 keys.toml
+keys.toml.zip
+keys-unreachable.toml
 /backup/
 /logs/
+/tests/
