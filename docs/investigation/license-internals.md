@@ -1815,3 +1815,185 @@ i.e. `bool read_chr_mode_bit(uint8_t *mbr_512_byte_buf) { return valid_mbr_signa
 - **Not yet done**: locating this bit-read function's own caller(s) inside `keyman`, to confirm the returned bit actually selects between `SOFTWARE-ID`/`nlevel` (x86) and `system_id`/`level` (CHR) parsing -- plausible given the function's name-free but purpose-obvious shape, but not directly observed yet.
 
 **Process note, not a code finding**: while running a `search` sanity-check invocation to verify the new default banner text, an agent's test command printed this project's full loaded `keys.toml` target list (as `search`'s own startup banner always does) to its own tool-call output, which included the `serial` field of three `private=true`-marked entries (`WUB2-EYCK`/`HCC0-4FJR`/`XU4M-NJ40`). The agent caught this itself, did not repeat the raw values in its final report, and the exposure was contained to that one agent's own internal tool-call transcript (not this document, not the main session's visible output). Recorded here as a reminder for future sessions: **any `search`/`check` invocation that loads the real `keys.toml` will print every loaded target's identifying fields to stdout as part of its normal startup banner** -- sanity-check runs meant only to verify CLI plumbing (not to search against real targets) should pass `--keys` pointing at a minimal/synthetic keys file, or filter to a single known-non-private entry, rather than loading the full real database.
+
+### 8.65 CHR `level` tier-name-to-value dispatch: re-confirmed string offsets in a fresh extraction, registration code located, the actual dispatch/lookup code still not reached
+
+Continuation of §8.42/§8.43/§8.52/§8.53's still-open "`free`/`p1`/`p10`/`p-unlimited` byte-value mapping" thread, prompted by a direct request for the values. Re-extracted the relevant files fresh (the originals from prior sessions, at `/private/tmp/mikrotik-7.24.2-extracted/`, no longer existed) from `routeros-7.24.2.npk` on the same patched ISO used in the `mikrotikpatch-keygen` investigation (`/var/lib/vz/template/iso/mikrotik-7.24.2-patch.iso` on the PVE host, `10.19.0.2`) -- `parser` and `console-resource`'s underlying `1073741824.mem` are **not** among the patch-modified files (confirmed by timestamp: everything the patcher touched is dated Sep 5, these two are Sep 3), so this extraction reflects genuine, unmodified MikroTik binaries despite coming from a "patched" ISO.
+
+**Confirmed offsets in `1073741824.mem`** (`strings -a -n 2 -t x`, note the default `strings` minimum-length cutoff of 4 silently drops `p1`/`p10` unless lowered):
+
+| String | File offset |
+|---|---|
+| `free` | `0x105d74` |
+| `p-unlimited` | `0x1d10bb` |
+| `p1` | `0x1d10c8` |
+| `p10` | `0x1d10cb` |
+
+These match §8.53's previously-recorded offsets (off by one byte on `p-unlimited`, consistent with a leading length-prefix byte convention already noted there). `free` sits far from the other three, which are clustered within ~16 bytes of each other -- consistent with §8.53's finding of a dedicated 4-choice `"level"` enum record containing `p-unlimited`/`p1`/`p10` plus a `"-"` sentinel, with `free` living in an unrelated, separate location in the file.
+
+**New this session**: unlike `keygen_x86` (Go, garble-obfuscated, no symbol recovery possible -- see `mikrotikpatch-keygen/01-dynamic-analysis-keygen-x86.md` §6.2), `parser` is a normal dynamically-linked C++ ELF binary. Local symbols are stripped, but the **dynamic symbol table survives**, so `objdump -d` resolves real mangled C++ names (e.g. `nv::message::insert<...>`) at call sites -- a materially better starting position than the keygen_x86 dead end.
+
+Traced one of the four call sites referencing the "registered-table" global `0x81066c8` (flagged as the next step in §8.43): the code at `0x809197f`-`0x80919c0` pushes the table pointer pair (`0x81066c8`/`0x81066cc`) plus a callback address (`0x8056083`) and two more globals (`0x8105324`/`0x8105328`), then calls into `nv::message::insert`. This is **registration** code -- populating the table with `(name, handler, field_id)` entries at startup -- not the lookup/dispatch code that later reads a stored integer and picks a display string from it. The actual dispatch path (the piece that would prove "byte value N renders as string S") was not reached this session either.
+
+**Numeric mapping confirmed by the user directly** (source: user-supplied, not re-derived from disassembly this session):
+
+| CHR `level` byte | Tier name |
+|---|---|
+| `0` | `free` |
+| `1` | `p1` |
+| `2` | `p10` |
+| `3` | `p-unlimited` |
+
+This is corroborated by this session's own CHR payload decoding (§8.38/§8.42 methodology, `docs/investigation/mikrotikpatch-keygen` decode-and-cross-check work): three user-supplied CHR License Key texts, sharing the identical `opaqueId`/`system-id` (`eJq8zK/UrhN`, the same value already documented in §8.38/§8.42 as a likely `loskiq/MikroTikPatch`-tool-generated test artifact), decoded to `level` bytes `1`, `2`, `3` respectively -- an exact match to a `p1`/`p10`/`p-unlimited` increasing-tier progression, consistent with a deliberate three-tier test-license set. The dispatch/lookup code itself (the piece that would prove this from disassembly alone) remains unreached.
+
+**Follow-up same session -- located the real resource record, but the previously-assumed `free` offset is wrong, and the exact key/value byte encoding still resists proof:**
+
+Re-extracted `nova/lib/console/1073741824.mem` fresh and located the actual "choices" resource record for the level field by walking pointer references instead of relying on `strings` proximity: at file offset `0x1d1094` there is a `count = 3` field followed by 3 entries whose pointers (runtime base `0x40000000`, so pointer `0x401d10bc` = file offset `0x1d10bc`, etc.) dereference to exactly the strings `p-unlimited` (`0x1d10bc`), `p1` (`0x1d10c8`), `p10` (`0x1d10cb`) -- confirmed by direct pointer-chasing, not just byte proximity.
+
+**Correction: `free` at file offset `0x105d74` is NOT part of this record.** It sits in an unrelated string cluster (`serial`, `fw-version`, `size`, `free`, `total-inodes`) that is clearly disk/storage metadata field names -- `free` there means "free disk space", not the license tier. The level-choices record only ever contains 3 entries (the 3 paid tiers); `free`/level-`0` never appears as an explicit string choice in it, consistent with level-`0` being an implicit/unset default the renderer special-cases rather than a real enum member.
+
+Attempted to recover the per-entry integer key from the raw bytes around each string pointer (to get a disassembly-level proof of which key maps to which string), but the interleaved words (`0, ptr, 1, 0, ptr, 2, 0, ptr, ptr`) don't fit a flat `{value, ptr}` array -- the shape instead looks like `std::map`-style tree/node bookkeeping (key + child pointers), which can't be confidently read without recovering the container's C++ type layout from vtable/RTTI info this session didn't pursue. **Decided to stop this specific byte-layout dig rather than force an unconvincing conclusion from raw bytes** -- the practical mapping in the table above already rests on two independent lines of evidence (direct user report + three real CHR samples decoding to a consistent `1→p1 / 2→p10 / 3→p-unlimited` progression) that don't depend on this structural proof.
+
+### 8.66 `nv::ROSModeValue::hasFeature()`'s one call site in `moduler` located and traced end-to-end: it gates USB LTE-modem hotplug drivers (`cdc-acm`/`lte_gct_eth`), not PCI NIC drivers -- the general "driver selection follows license mode" mechanism is now proven real, but not yet shown to cover the network-driver case that motivated this whole thread
+
+Direct continuation of §8.64, prompted by the observation that §8.64 only nailed down `keyman`'s own licensing-format read of MBR `0x150` -- it did not answer the original driver-selection question that started this investigation (`mikrotik-gpl`'s single unified `x86_64.config`, then the keygen's `x86`/`chr` MBR-flag switch).
+
+**Method**: `objdump -d` on `nova/bin/moduler` (x86 build, `routeros-7.24.2.npk`) resolves PLT stub symbols directly by name (e.g. `0804e650 <_ZNK2nv12ROSModeValue10hasFeatureENS_12feature_info7FeatureE@plt>:`) since the dynamic symbol table survives stripping -- so locating call sites is a plain `grep` for `calll <that address>` against the disassembly, no manual GOT/relocation arithmetic needed (this is a materially easier path than chasing raw hex offsets, and was the missing step in the prior session's PLT search that came up empty).
+
+**Result: exactly one call site**, wrapped in a tiny standalone helper at `0x804fa27`:
+
+```asm
+804fa27: call   nv::rosMode()                    ; eax = current mode object
+804fa34: pushl  $0x12                             ; Feature enum value = 18
+804fa37: call   ROSModeValue::hasFeature(Feature) ; bool result
+```
+
+That helper itself has exactly three callers, all inside a single large USB-device-ID matching function (bitmask-field comparator matching vendor/product/class-style fields, the classic shape of a USB match-table walk). The surrounding `.rodata` string references pin the context precisely: `hotplug.cpp`, `usbAdded`, `drivers.size()`, and two candidate driver names, `cdc-acm` (generic USB CDC-ACM modem driver) and `lte_gct_eth` (MikroTik's own GCT-chipset LTE driver).
+
+**Conclusion**: Feature `0x12` gates whether `moduler` offers/binds USB LTE-modem drivers when a matching USB device is hotplugged -- plausible real-world rationale being that a VM (CHR) generally has no USB bus to plug an LTE modem into in the first place, so licensing this class of driver off for non-physical-hardware modes is a sensible product decision, independent of whether it's literally tied to the `x86`/`chr` MBR bit specifically (Feature `0x12` could gate on some other `ROSMode` axis entirely -- the enum's other values, and what board/mode combinations set bit `0x12`, were not enumerated this session).
+
+**This proves the mechanism is real** (driver offering genuinely does get gated through `ROSModeValue::hasFeature()`, not just imagined) **but does not close the original question**: this is the *only* `hasFeature()` call site in `moduler`, and it's USB-specific, not PCI-NIC-specific. No equivalent gating call was found near any PCI/NIC device-matching code in this session -- either PCI NIC selection doesn't go through `ROSMode` at all (i.e. it's genuinely pure hardware autodetection, consistent with the standing "one shared driver set, autodetected, no flag involved" hypothesis for the *networking* case specifically), or that code path exists elsewhere (a different binary, e.g. `parser`/`loader`, or a kernel-side `modules.alias` mechanism with no userspace `ROSMode` check at all) and wasn't searched this session.
+
+**Not yet done**: locating (or ruling out) any `hasFeature()`/`ROSMode`-adjacent gating specifically in PCI network-driver matching code, in `moduler` or elsewhere -- this is the concrete next step to actually settle the thread that started with `mikrotik-gpl`'s `x86_64.config`.
+
+### 8.67 Full `nv::feature_info::Feature` enum extracted (117 named entries, including `chr`=`0x2d`/`nochr`=`0x2e`) and every hardcoded `hasFeature()` call site across `moduler`/`sysinit`/`loader` enumerated -- PCI network-driver matching confirmed to have zero `hasFeature()` gating anywhere reachable this session
+
+Direct continuation of §8.66, answering "what are `hasFeature()`'s possible argument values" and exhaustively checking whether any of them is actually `chr`/`nochr`.
+
+**Extracting the enum table**: `nv::feature_info::each()`/`nv::feature_info::feature(Feature)` (both exported from `libumsg.so`) walk a static array of 16-byte `FTinfo` records (`{int32 feature_id; char* name_ptr; uint32 name_len; uint32 extra}`). Traced the PIC base-address computation (`call <get_pc_thunk>` then `add $0x2654D, %eax`, landing on `.got.plt`'s VMA `0x7f000`) to locate the table at VMA `0x7ccc0`-`0x7d410` (117 × 16 = 1872 = `0x750` bytes, matching the loop bound seen in the disassembly), then translated VMA→file-offset per `objdump -p`'s four `LOAD` segments (`.data.rel.ro`'s segment has `off=0x76f8c, vaddr=0x77f8c`, i.e. a `-0x1000` delta) and parsed all 117 records directly out of the file with a small Python script -- no debugger/IDA needed, pure static reading of the compiled table.
+
+**Full table** (id, name; `extra` mostly `0/1` for what looks like a package-vs-hardware-capability split, with a `0x100` block of 25 consecutive `mode-*` entries at `0x4e`-`0x62` that looks like a distinct third category, e.g. runtime feature-toggles rather than static package/hardware facts):
+
+```
+ 0 system                 30 ww2-testcmd            60 pcie_passthrough      90 mode-proxy
+ 1 advanced-tools         31 wipe-vm                61 switch-mirror1        91 mode-hotspot
+ 2 container               32 zerotier               62 switch-mv88e6xxx      92 mode-smb
+ 3 calea                   33 rbmeta                 63 switch-mirror-prestera 93 mode-email
+ 4 cloud-server            34 rbswitch               64 switch-rate           94 mode-zerotier
+ 5 devtools                35 notvm                  65 storage                95 mode-container
+ 6 dfstest                 36 smp                    66 switch-marvell        96 mode-downgrade
+ 7 dhcp                    37 lcd                    67 wireguard-relay       97 mode-partitions
+ 8 dude                    38 poe                    68 cloud-vpn             98 mode-bootloader
+ 9 gps                     39 poeattiny              69 ww2-mtktest           99 poe-4p-power
+10 hotspot                 40 poepwrchg              70 uefi                  100 lora-test
+11 iot                     41 poesettings            71 prestera-ac3          101 dev-testing
+12 ipv6                    42 musicswitch            72 prestera-bc2          102 partitions
+13 kvm                     43 switch                 73 prestera-cpss         103 rb-usb
+14 modemlog                44 multiswitch            74 health                104 button-mode
+15 (empty)                 45 chr                    75 health-settings       105 button-wps
+16 netinstall              46 nochr                  76 fix-rb                106 ww2-sigmadut
+17 openflow                47 sim-slot               77 iot-bt-extra          107 sim-link
+18 option                  48 modem-antenna-switch   78 mode-tainted          108 rps
+19 ppp                     49 modem-antenna-scan     79 mode-tainting-enabled 109 dev-sfp
+20 rb-netinstall           50 rb-gps                 80 mode-scheduler        110 ww2-mmtest
+21 rose-storage            51 60ghz                  81 mode-socks            111 cmr
+22 security                52 oldswitch              82 mode-fetch            112 app
+23 terragraph              53 crs_prestera           83 mode-pptp             113 ww2-be-testcmd
+24 tr069-client            54 swos                   84 mode-l2tp             114 dev-nfc
+25 training                55 pwrlink                85 mode-btest            115 iot-bt-test
+26 ups                     56 wpssync                86 mode-trafgen          116 poe-in
+27 user-manager            57 ptp                    87 mode-sniff
+28 wireless                58 gpio                   88 mode-ipsec
+29 wifi                    59 nband                  89 mode-romon
+```
+
+(`18 option` is the Feature already traced end-to-end in §8.66 -- confirmed here to be the *only* value anything in `moduler` ever checks. `45 chr` / `46 nochr` are the two entries directly relevant to this investigation's original question.)
+
+**Exhaustive call-site sweep, three binaries** (x86 build; method: find each binary's `hasFeatureENS_12feature_info7FeatureE@plt` label -- `objdump -d` resolves it by name since the dynamic symbol table survives stripping -- then `grep` for `calll <that address>` against the same disassembly, no manual relocation math needed):
+
+| Binary | Call sites | Feature argument |
+|---|---|---|
+| `moduler` | 3 (all one wrapper, §8.66) | `0x12` (`option`) x3 |
+| `sysinit` | 2 | `0x12` x2 |
+| `loader` | 11 (9 direct + 2 indirect) | `0x12` x9 hardcoded; 2 receive the Feature via a register from *their own* caller, not traced further |
+| `parser` | 1 | Received via a register from its own caller (`0x8(%ebp)`), not traced further |
+
+**Every single hardcoded `hasFeature()` argument found across all three fully-traced binaries is `0x12` (`option`) -- none is `0x2d` (`chr`) or `0x2e` (`nochr`).** Two `loader` call sites and `parser`'s one call site pass the Feature value through as a parameter rather than a literal, meaning `chr`/`nochr` *could* still be checked somewhere upstream of those three indirect sites -- but that requires one more level of caller-tracing than done this session.
+
+**Net effect**: strengthens (does not fully close) §8.66's finding that PCI/NIC driver selection has no `hasFeature()` gating -- across 17 total call sites now enumerated in the three binaries most likely to touch driver loading, `chr`/`nochr` never appears as a literal argument anywhere. Combined with §8.68 below (which reframes what `ROSMode` actually represents), the working conclusion is that `chr`/`nochr` are unlikely to be checked via `hasFeature()` in the networking-driver path at all.
+
+### 8.68 CORRECTION to the working theory: `nv::ROSMode`/`rosMode()` is not primarily an x86-vs-CHR switch -- disassembling `nova/bin/mode`'s `main()` shows it's a general RouterBOARD hardware-family classifier, of which `chr`/`x86` are just two possible values among many real board-model prefixes
+
+`nova/bin/mode` was initially suspected (from its name alone) to be the official x86/CHR mode-switch tool. A `strings` pass seemed to rule it out (the only `x86`-adjacent hit was in an unrelated board-model list: `RB912R-2nD`, `D53G-5HacD2HnD`, `RB951Ui-2nD`, `x86`, `RB1100Dx4`, ...) -- but disassembling `main()` directly (traced `_start`'s pushed entry-point argument to `0x8057961`, which does nothing but call one real function at `0x80549af`) shows this dismissal was premature, and reveals something more interesting than either original guess:
+
+```c
+// nova/bin/mode main()'s real body, 0x80549af (entry traced via _start's pushed argument)
+void classify_and_persist_mode() {
+    message msg;
+    bool found;
+    ROSMode::loadMsg(&msg, &found);          // reads /rw/rosmode.msg or /nova/store/rosmode
+
+    uint32_t classification;
+    if (msg.has<u32_id>(10)) {
+        classification = stored_value ^ stored_byte;   // already persisted -- use it
+        goto build_and_persist_features;                // 0x80550b2, skips the whole chain below
+    }
+
+    if (readHcfgField(0x30, &classification, 4, false) == 4) {
+        goto build_and_persist_features;   // hw-config field has it directly
+    }
+
+    // No stored value, no hw-config field -- derive one from real board-model-name prefixes.
+    // This is a genuinely linear, ~30-40-entry chain, all following the identical shape
+    // (isBoardNamePrefix(const string) -> on match, set a specific classification value, jump
+    // to `store`) -- not abbreviated here for space, the repetition itself is the finding:
+    if (isBoardNamePrefix("RB1100"))                      { classification = 3; goto store; }
+    if (isBoardNamePrefix("RB1100"/"RB760"/"RB924"))      { classification = 0; goto store; }
+    if (isBoardNamePrefix("RB450"/"RB941-2nD"/"RBwA..."))  { classification = 1; goto store; }
+    if (isBoardNamePrefix("RB750"/"RBCube-60ad"))         { classification = 2; goto store; }
+    // ... chain continues to 0x8055092, ~30 more real RouterBOARD model-prefix checks, each the
+    //     same shape -- not enumerated exhaustively here
+    if (isBoardNamePrefix(second_to_last_prefix_set))     { /* falls through */ }
+    classification = 2 - (uint8_t)last_isBoardNamePrefix_result;   // terminal case uses
+                                                                     // subtraction, not a new
+                                                                     // constant, to fold the
+                                                                     // last 2-3 cases together
+store:
+    msg.insert<u32_id>(/*field=*/0xa, classification);
+
+build_and_persist_features:
+    message big_msg;
+    // ~40 lines of pure data init: zero several sub-fields, then set hardcoded constants
+    // (0/1, 0x1010001, 0x1010101, ...) -- looks like a default feature/capability bitmap, no
+    // branches
+    uint32_t x = big_msg.get<u32_id>(/*field=*/0x1b6);
+
+    // Separate concern, unrelated to the board-classification chain above: a boot-attempt
+    // counter, confirmed at file offset 0x10a2b -> string "/rw/startcount"
+    int fd = open("/rw/startcount", ...);
+    uint64_t count;
+    read(fd, &count, 8);
+    count += 1;                 // 64-bit increment (addl + adcl carry)
+    pwrite(fd, &count, 8, 0);
+    ftruncate(fd, 8);
+    fsync(fd);
+    close(fd);
+    // (further logic exists past this point, not traced this session)
+}
+```
+
+**This means `nv::ROSMode` is a general hardware/board-family classifier**, not a dedicated x86/CHR switch -- it derives (and persists) a classification value from real RouterBOARD model-name prefixes when no value is already stored, which lines up with §8.67's Feature table being dominated by hardware-capability entries (`poe`/`poeattiny`/`poesettings`, `lcd`, `switch`/`switch-marvell`/`switch-mv88e6xxx`, `gpio`, `rbmeta`, `rbswitch`, `60ghz`, `crs_prestera`, `swos`, ...) rather than licensing concepts. `chr`(`0x2d`) and `nochr`(`0x2e`) are two entries in this same 117-value system, presumably set for CHR/non-CHR builds specifically, but the system as a whole exists to answer "what kind of board-family capabilities does this device have" -- a materially different question from "should this license parse as SOFTWARE-ID/nlevel or system_id/level."
+
+**Net effect on the whole investigation thread**: §8.64's finding stands unchanged and is the actual answer to the original licensing-format question -- `keyman` reads MBR `0x150` bit 0 directly, via its own standalone function, independent of `ROSMode` entirely. §8.66/§8.67's `ROSMode`/`hasFeature()` work was real and correctly executed, but was chasing a mechanism that turns out to serve a different purpose (hardware-family/capability classification, most heavily used for physical-board features like PoE/switch-chip/LCD) rather than the x86-vs-CHR licensing switch that motivated the `mikrotik-gpl`/keygen thread. Whether `ROSMode`'s `chr`/`nochr` classification values are *themselves* seeded from the same MBR `0x150` bit (i.e. two independent readers of the same underlying flag, for two different purposes) was not checked this session and remains open.
+
+**Net status, unchanged in substance from §8.53**: the four tier-name strings' file locations are now doubly-confirmed (original extraction + this fresh one), and the registration-side code is now identified precisely (not just inferred to exist), but the numeric-value-to-string mapping itself remains unconfirmed. Concrete next step, if resumed: follow the values stored via `nv::message::insert` forward (not backward from the registration call) to whatever later reads the stored `level`/`nlevel` field and produces CLI output text -- likely inside the same shared license-info function region already documented in §8.52 (`0x8051a9c`-`0x8052188`), or a `/system license print` formatting routine downstream of it.
